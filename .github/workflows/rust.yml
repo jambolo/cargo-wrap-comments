@@ -1,0 +1,56 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "develop", "master", "feature/**" ]
+  pull_request:
+    branches: [ "develop", "master" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  TOOLCHAIN: stable
+  TARPAULIN_VERSION: 0.34.1
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v5
+
+    - name: Setup Rust toolchain
+      uses: actions-rust-lang/setup-rust-toolchain@v1
+      with:
+        toolchain: ${{ env.TOOLCHAIN }}
+        components: |
+          clippy
+          rustfmt
+        cache: true        # enable automatic caching (default, but explicit)
+        cache-bin: true    # ensure ~/.cargo/bin (tarpaulin etc.) is cached
+        rustflags: ""      # avoid forcing RUSTFLAGS="-D warnings"
+
+    - name: Check code formatting
+      uses: actions-rust-lang/rustfmt@v1
+      continue-on-error: true
+
+    - name: Lint with Clippy
+      run: cargo clippy --all-targets --all-features -- -D warnings
+      continue-on-error: true
+
+    - name: Build
+      run: cargo build --verbose
+
+    - name: Run tests
+      run: cargo test --verbose
+
+    - name: Generate code coverage
+      run: |
+        cargo install cargo-tarpaulin --version ${{ env.TARPAULIN_VERSION }} --locked || cargo tarpaulin --version
+        cargo tarpaulin --out Xml
+      continue-on-error: true
+
+    - name: Upload coverage to Codecov
+      uses: codecov/codecov-action@v5
+      with:
+        files: tarpaulin-report.xml
+        fail_ci_if_error: false
