@@ -1,6 +1,6 @@
-# comment-reformatter
+# comment_formatter
 
-A Rust command-line tool that reformats source code comments to wrap long lines at a specified width.
+A Rust command-line tool that formats source code comments to wrap long lines at a specified width. This does what rustfmt should do.
 
 ## Features
 
@@ -19,22 +19,22 @@ A Rust command-line tool that reformats source code comments to wrap long lines 
 cargo build --release
 ```
 
-The binary will be at `target/release/comment-reformatter`.
+The binary will be at `target/release/comment_formatter`.
 
 ## Usage
 
 ```sh
-# Reformat a single file
-comment-reformatter src/main.rs
+# Format comments in a single file
+comment_formatter src/main.rs
 
-# Reformat multiple files with glob patterns
-comment-reformatter "src/**/*.rs"
+# Format comments in multiple files with glob patterns
+comment_formatter "src/**/*.rs"
 
 # Set custom width
-comment-reformatter --width 80 src/main.rs
+comment_formatter --width 80 src/main.rs
 
 # Preview changes without modifying files
-comment-reformatter --check src/main.rs
+comment_formatter --check src/main.rs
 ```
 
 ## Options
