@@ -1,6 +1,12 @@
 [package]
-name = "comment_formatter"
+name = "cargo-wrap-comments"
 version = "0.1.0"
 edition = "2024"
+license = "MIT"
+repository = "https://github.com/jambolo/cargo-wrap-comments"
+description = "A CLI tool that reformats source code comments to wrap at a specified width."
 
 [dependencies]
+clap = { version = "4.5.60", features = ["derive"] }
+glob = "0.3.3"
+toml = "1.0.4"
