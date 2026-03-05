@@ -1,5 +1,8 @@
 # comment_formatter
 
+[![Rust (master)](https://github.com/jambolo/comment_formatter/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/jambolo/comment_formatter/actions/workflows/rust.yml?query=branch%3Amaster)
+[![Rust (develop)](https://github.com/jambolo/comment_formatter/actions/workflows/rust.yml/badge.svg?branch=develop)](https://github.com/jambolo/comment_formatter/actions/workflows/rust.yml?query=branch%3Adevelop)
+
 A Rust command-line tool that formats source code comments to wrap long lines at a specified width. This does what rustfmt should do.
 
 ## Features
