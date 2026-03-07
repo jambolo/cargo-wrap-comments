@@ -131,9 +131,7 @@ fn hierarchical_marker_width(text: &str) -> usize {
             return hashes + 1;
         }
     }
-    if matches!(text.as_bytes().first(), Some(b'-' | b'*'))
-        && text.as_bytes().get(1) == Some(&b' ')
-    {
+    if matches!(text.as_bytes().first(), Some(b'-' | b'*')) && text.as_bytes().get(1) == Some(&b' ') {
         return 2;
     }
     let mut chars = text.chars();
@@ -158,8 +156,8 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !current.text.contains("```")
 }
 
-/// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` ``
-/// or ` `` `) as single tokens even if they contain spaces.
+/// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or
+/// ` `` ` as single tokens even if they contain spaces.
 fn tokenize_preserving_backticks(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -378,9 +376,7 @@ fn find_rustfmt_width() -> Option<usize> {
 
 /// Resolves the effective line width: CLI argument > `rustfmt.toml` > [`DEFAULT_WIDTH`].
 fn resolve_width(cli_width: Option<usize>) -> usize {
-    cli_width
-        .or_else(find_rustfmt_width)
-        .unwrap_or(DEFAULT_WIDTH)
+    cli_width.or_else(find_rustfmt_width).unwrap_or(DEFAULT_WIDTH)
 }
 
 fn main() {
@@ -458,12 +454,14 @@ fn main() {
             eprintln!("Error writing {}: {e}", path.display());
             had_errors = true;
             continue;
-        } else {
+        } else if !cli.quiet {
             println!("Modified: {}", path.display());
         }
     }
 
-    println!("\nProcessed {files_processed} file(s), {files_modified} modified.");
+    if !cli.quiet {
+        println!("\nProcessed {files_processed} file(s), {files_modified} modified.");
+    }
 
     if had_errors {
         process::exit(1);
@@ -522,29 +520,61 @@ mod tests {
 
     #[test]
     fn test_combine_basic() {
-        let a = CommentLine { indent: "".into(), marker: "//".into(), text: "hello".into() };
-        let b = CommentLine { indent: "".into(), marker: "//".into(), text: "world".into() };
+        let a = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "hello".into(),
+        };
+        let b = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "world".into(),
+        };
         assert!(can_combine(&a, &b));
     }
 
     #[test]
     fn test_no_combine_different_markers() {
-        let a = CommentLine { indent: "".into(), marker: "//".into(), text: "hello".into() };
-        let b = CommentLine { indent: "".into(), marker: "///".into(), text: "world".into() };
+        let a = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "hello".into(),
+        };
+        let b = CommentLine {
+            indent: "".into(),
+            marker: "///".into(),
+            text: "world".into(),
+        };
         assert!(!can_combine(&a, &b));
     }
 
     #[test]
     fn test_no_combine_blank() {
-        let a = CommentLine { indent: "".into(), marker: "//".into(), text: "hello".into() };
-        let b = CommentLine { indent: "".into(), marker: "//".into(), text: "".into() };
+        let a = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "hello".into(),
+        };
+        let b = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "".into(),
+        };
         assert!(!can_combine(&a, &b));
     }
 
     #[test]
     fn test_no_combine_hierarchical() {
-        let a = CommentLine { indent: "".into(), marker: "//".into(), text: "hello".into() };
-        let b = CommentLine { indent: "".into(), marker: "//".into(), text: "- bullet".into() };
+        let a = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "hello".into(),
+        };
+        let b = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "- bullet".into(),
+        };
         assert!(!can_combine(&a, &b));
     }
 
@@ -649,7 +679,10 @@ mod tests {
     fn test_process_content_wraps_bullet_with_indent() {
         let input = "// - This is a very long bullet point that should wrap with proper indentation\n";
         let (output, changes) = process_content(input, 40);
-        assert_eq!(output, "// - This is a very long bullet point\n//   that should wrap with proper\n//   indentation\n");
+        assert_eq!(
+            output,
+            "// - This is a very long bullet point\n//   that should wrap with proper\n//   indentation\n"
+        );
         assert!(!changes.is_empty());
     }
 
@@ -657,7 +690,10 @@ mod tests {
     fn test_process_content_wraps_numbered_with_indent() {
         let input = "// 1. This is a very long numbered item that should wrap with proper indentation\n";
         let (output, _) = process_content(input, 40);
-        assert_eq!(output, "// 1. This is a very long numbered item\n//    that should wrap with proper\n//    indentation\n");
+        assert_eq!(
+            output,
+            "// 1. This is a very long numbered item\n//    that should wrap with proper\n//    indentation\n"
+        );
     }
 
     #[test]
