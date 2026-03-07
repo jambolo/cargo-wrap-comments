@@ -34,6 +34,40 @@ Uses a two-level clap enum: `CargoCli::WrapComments(Cli)`. This allows `cargo wr
 - `CommentLine` — parsed comment with `indent`, `marker`, `text` fields
 - `Cli` — clap derive struct with `files`, `max_width`, `check`, `verbose`, `quiet`
 
+### Joining Rules (`can_combine()`)
+
+Two adjacent comment lines are joined into one when ALL of these hold:
+
+1. Same `marker` (`//`, `///`, or `//!`)
+2. Same `indent` (leading whitespace)
+3. Neither line has empty text (blank comments are paragraph separators)
+4. Next line does not start with a hierarchical marker
+5. Current line does not contain a code fence (`` ``` ``)
+
+Lines inside a code block (between `` ``` `` toggles) are never joined or wrapped.
+
+### Hierarchical Markers (`starts_with_hierarchical_marker()`)
+
+These patterns at the start of comment text prevent joining with the previous line:
+
+- `#` (markdown headings)
+- `*` or `-` (bullet lists)
+- `` ``` `` (code fences)
+- One or more digits followed by `.` (e.g. `1.`, `10.`, `100.`)
+- Single letter followed by `.` (e.g. `A.`, `a.`)
+
+### Wrapping Rules (`wrap_text()`)
+
+- Only triggers when the combined line exceeds `max_width`
+- Splits at whitespace boundaries
+- Backtick-delimited spans (`` ` `` or `` `` ``) are tokenized as single units and never split
+- Words exceeding available width are emitted unsplit on their own line
+- Continuation lines after hierarchical markers get extra indent matching the marker width:
+  - `- ` or `* ` → 2 chars
+  - `X. ` (single letter) → 3 chars
+  - `N. ` (multi-digit number like `10.`) → digit count + 2 chars
+  - `# ` headings → hash count + 1 chars
+
 ### Dependencies
 
 - `clap` (derive) for CLI parsing
