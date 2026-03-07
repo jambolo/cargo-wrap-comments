@@ -108,20 +108,33 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
 
 /// Returns `true` if `text` begins with a markdown-style structural marker.
 ///
-/// Recognized markers: `#`, `*`, `-`, `` ``` ``, or an alphanumeric character
-/// followed by `.` (e.g. `1.`, `A.`, `a.`).
+/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`,
+/// `a.`), or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
         return true;
     }
     let mut chars = text.chars();
-    matches!(
-        (chars.next(), chars.next()),
-        (Some(c), Some('.')) if c.is_ascii_alphanumeric()
-    )
+    if let Some(c) = chars.next()
+        && c.is_ascii_alphanumeric()
+    {
+        if !c.is_ascii_digit() {
+            return chars.next() == Some('.');
+        }
+        for ch in chars {
+            if ch == '.' {
+                return true;
+            }
+            if !ch.is_ascii_digit() {
+                return false;
+            }
+        }
+    }
+    false
 }
 
-/// Returns the width of a hierarchical marker prefix (e.g. `- ` → 2, `1. ` → 3, `## ` → 3).
+/// Returns the width of a hierarchical marker prefix (e.g. `- ` → 2, `1. ` → 3, `10. ` → 4,
+/// `## ` → 3).
 ///
 /// Returns 0 if the text does not start with a recognized marker.
 fn hierarchical_marker_width(text: &str) -> usize {
@@ -135,12 +148,24 @@ fn hierarchical_marker_width(text: &str) -> usize {
     {
         return 2;
     }
-    let mut chars = text.chars();
-    if let (Some(c), Some('.')) = (chars.next(), chars.next())
-        && c.is_ascii_alphanumeric()
-        && text.as_bytes().get(2) == Some(&b' ')
+    let bytes = text.as_bytes();
+    if let Some(&first) = bytes.first()
+        && first.is_ascii_alphanumeric()
     {
-        return 3;
+        if !first.is_ascii_digit() {
+            // Single letter: `A. `
+            if bytes.get(1) == Some(&b'.') && bytes.get(2) == Some(&b' ') {
+                return 3;
+            }
+        } else {
+            // Multi-digit: `1. `, `10. `, `100. `, etc.
+            let digit_count = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
+            if bytes.get(digit_count) == Some(&b'.')
+                && bytes.get(digit_count + 1) == Some(&b' ')
+            {
+                return digit_count + 2;
+            }
+        }
     }
     0
 }
@@ -688,6 +713,33 @@ mod tests {
         assert_eq!(hierarchical_marker_width("### heading"), 4);
         assert_eq!(hierarchical_marker_width("normal text"), 0);
         assert_eq!(hierarchical_marker_width("```code"), 0);
+        assert_eq!(hierarchical_marker_width("10. item"), 4);
+        assert_eq!(hierarchical_marker_width("100. item"), 5);
+    }
+
+    #[test]
+    fn test_multi_digit_hierarchical_marker() {
+        assert!(starts_with_hierarchical_marker("10. tenth item"));
+        assert!(starts_with_hierarchical_marker("100. hundredth"));
+        assert!(!starts_with_hierarchical_marker("10x not a marker"));
+    }
+
+    #[test]
+    fn test_no_combine_multi_digit_numbered() {
+        let input = "// first line\n// 10. tenth item\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, input);
+    }
+
+    #[test]
+    fn test_process_content_wraps_multi_digit_numbered_with_indent() {
+        let input =
+            "// 10. This is a very long numbered item that should wrap with proper indentation\n";
+        let (output, _) = process_content(input, 40);
+        assert_eq!(
+            output,
+            "// 10. This is a very long numbered item\n//     that should wrap with proper\n//     indentation\n"
+        );
     }
 
     #[test]
