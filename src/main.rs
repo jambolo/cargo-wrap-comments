@@ -160,9 +160,7 @@ fn hierarchical_marker_width(text: &str) -> usize {
         } else {
             // Multi-digit: `1. `, `10. `, `100. `, etc.
             let digit_count = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-            if bytes.get(digit_count) == Some(&b'.')
-                && bytes.get(digit_count + 1) == Some(&b' ')
-            {
+            if bytes.get(digit_count) == Some(&b'.') && bytes.get(digit_count + 1) == Some(&b' ') {
                 return digit_count + 2;
             }
         }
@@ -336,7 +334,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
                 };
                 if can_combine(&current, &next_comment) {
                     combined_text.push(' ');
-                    combined_text.push_str(&next_comment.text);
+                    combined_text.push_str(next_comment.text.trim_start());
                     orig_lines.push(lines[j].to_string());
                     j += 1;
                     continue;
@@ -740,6 +738,20 @@ mod tests {
             output,
             "// 10. This is a very long numbered item\n//     that should wrap with proper\n//     indentation\n"
         );
+    }
+
+    #[test]
+    fn test_combine_strips_hanging_indent() {
+        let input = "// - bullet point\n//   continuation text\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// - bullet point continuation text\n");
+    }
+
+    #[test]
+    fn test_combine_strips_hanging_indent_numbered() {
+        let input = "// 1. first item\n//    more text here\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// 1. first item more text here\n");
     }
 
     #[test]
