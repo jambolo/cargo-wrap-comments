@@ -131,14 +131,16 @@ fn hierarchical_marker_width(text: &str) -> usize {
             return hashes + 1;
         }
     }
-    if matches!(text.as_bytes().first(), Some(b'-' | b'*')) && text.as_bytes().get(1) == Some(&b' ') {
+    if matches!(text.as_bytes().first(), Some(b'-' | b'*')) && text.as_bytes().get(1) == Some(&b' ')
+    {
         return 2;
     }
     let mut chars = text.chars();
-    if let (Some(c), Some('.')) = (chars.next(), chars.next()) {
-        if c.is_ascii_alphanumeric() && text.as_bytes().get(2) == Some(&b' ') {
-            return 3;
-        }
+    if let (Some(c), Some('.')) = (chars.next(), chars.next())
+        && c.is_ascii_alphanumeric()
+        && text.as_bytes().get(2) == Some(&b' ')
+    {
+        return 3;
     }
     0
 }
@@ -173,7 +175,7 @@ fn tokenize_preserving_backticks(text: &str) -> Vec<String> {
                     i += 1;
                 }
                 current.push_str(&text[start..i]);
-                if i - start >= cl {
+                if i - start == cl {
                     close_len = None;
                 }
             } else {
@@ -223,7 +225,11 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
     let mut current_line = String::new();
 
     for word in words.iter() {
-        let current_prefix = if lines.is_empty() { prefix } else { continuation_prefix };
+        let current_prefix = if lines.is_empty() {
+            prefix
+        } else {
+            continuation_prefix
+        };
         let available = max_width.saturating_sub(current_prefix.len()).max(1);
 
         if current_line.is_empty() {
@@ -232,14 +238,26 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
             current_line.push(' ');
             current_line.push_str(word);
         } else {
-            lines.push(format!("{current_prefix}{current_line}").trim_end().to_string());
+            lines.push(
+                format!("{current_prefix}{current_line}")
+                    .trim_end()
+                    .to_string(),
+            );
             current_line = word.to_string();
         }
     }
 
     if !current_line.is_empty() {
-        let current_prefix = if lines.is_empty() { prefix } else { continuation_prefix };
-        lines.push(format!("{current_prefix}{current_line}").trim_end().to_string());
+        let current_prefix = if lines.is_empty() {
+            prefix
+        } else {
+            continuation_prefix
+        };
+        lines.push(
+            format!("{current_prefix}{current_line}")
+                .trim_end()
+                .to_string(),
+        );
     }
 
     lines
@@ -320,7 +338,11 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         let new_lines = if !combined_text.is_empty() && full_line.len() > max_width {
             wrap_text(&combined_text, &prefix, &continuation_prefix, max_width)
         } else if combined_text.is_empty() {
-            vec![format!("{}{}", comment.indent, comment.marker).trim_end().to_string()]
+            vec![
+                format!("{}{}", comment.indent, comment.marker)
+                    .trim_end()
+                    .to_string(),
+            ]
         } else {
             vec![full_line.trim_end().to_string()]
         };
@@ -376,7 +398,9 @@ fn find_rustfmt_width() -> Option<usize> {
 
 /// Resolves the effective line width: CLI argument > `rustfmt.toml` > [`DEFAULT_WIDTH`].
 fn resolve_width(cli_width: Option<usize>) -> usize {
-    cli_width.or_else(find_rustfmt_width).unwrap_or(DEFAULT_WIDTH)
+    cli_width
+        .or_else(find_rustfmt_width)
+        .unwrap_or(DEFAULT_WIDTH)
 }
 
 fn main() {
@@ -594,7 +618,10 @@ mod tests {
     fn test_combines_and_wraps() {
         let input = "// This is a long comment that\n// should be combined\n";
         let (output, changes) = process_content(input, 40);
-        assert_eq!(output, "// This is a long comment that should be\n// combined\n");
+        assert_eq!(
+            output,
+            "// This is a long comment that should be\n// combined\n"
+        );
         assert!(!changes.is_empty());
     }
 
@@ -666,18 +693,25 @@ mod tests {
     #[test]
     fn test_wrap_hierarchical_marker_indent() {
         let result = wrap_text("- this is a long bullet point text", "// ", "//   ", 30);
-        assert_eq!(result, vec!["// - this is a long bullet", "//   point text"]);
+        assert_eq!(
+            result,
+            vec!["// - this is a long bullet", "//   point text"]
+        );
     }
 
     #[test]
     fn test_wrap_numbered_list_indent() {
         let result = wrap_text("1. this is a long numbered item text", "// ", "//    ", 30);
-        assert_eq!(result, vec!["// 1. this is a long numbered", "//    item text"]);
+        assert_eq!(
+            result,
+            vec!["// 1. this is a long numbered", "//    item text"]
+        );
     }
 
     #[test]
     fn test_process_content_wraps_bullet_with_indent() {
-        let input = "// - This is a very long bullet point that should wrap with proper indentation\n";
+        let input =
+            "// - This is a very long bullet point that should wrap with proper indentation\n";
         let (output, changes) = process_content(input, 40);
         assert_eq!(
             output,
@@ -688,7 +722,8 @@ mod tests {
 
     #[test]
     fn test_process_content_wraps_numbered_with_indent() {
-        let input = "// 1. This is a very long numbered item that should wrap with proper indentation\n";
+        let input =
+            "// 1. This is a very long numbered item that should wrap with proper indentation\n";
         let (output, _) = process_content(input, 40);
         assert_eq!(
             output,
@@ -707,7 +742,8 @@ mod tests {
 
     #[test]
     fn test_no_trailing_spaces_after_wrap() {
-        let input = "// This is a long comment that needs to be wrapped because it exceeds the width\n";
+        let input =
+            "// This is a long comment that needs to be wrapped because it exceeds the width\n";
         let (output, _) = process_content(input, 40);
         for line in output.lines() {
             assert_eq!(line, line.trim_end(), "trailing spaces in: {:?}", line);
@@ -716,7 +752,8 @@ mod tests {
 
     #[test]
     fn test_no_trailing_spaces_doc_comment() {
-        let input = "///\n/// Some doc text that is long enough to wrap around to the next line easily\n";
+        let input =
+            "///\n/// Some doc text that is long enough to wrap around to the next line easily\n";
         let (output, _) = process_content(input, 40);
         for line in output.lines() {
             assert_eq!(line, line.trim_end(), "trailing spaces in: {:?}", line);
@@ -775,6 +812,40 @@ mod tests {
             let backtick_count = text.chars().filter(|&c| c == '`').count();
             assert_eq!(backtick_count % 2, 0, "unmatched backtick in: {line:?}");
         }
+    }
+
+    #[test]
+    fn test_tokenize_single_backtick_not_closed_by_double() {
+        // ` `` ` is a single-backtick span containing `` (space-double-backtick-space)
+        assert_eq!(
+            tokenize_preserving_backticks("` `` ` rest"),
+            vec!["` `` `", "rest"]
+        );
+    }
+
+    #[test]
+    fn test_tokenize_mixed_backtick_delimiters() {
+        // `` ` `` is a double-backtick span containing a single backtick ` `` ` is a
+        // single-backtick span containing double backticks
+        assert_eq!(
+            tokenize_preserving_backticks("`` ` `` or ` `` ` end"),
+            vec!["`` ` ``", "or", "` `` `", "end"]
+        );
+    }
+
+    #[test]
+    fn test_wrap_does_not_split_mixed_backtick_spans() {
+        // `` ` `` and ` `` ` are complete backtick spans; wrapping must not split them
+        let input = "/// keeps (`` ` `` or ` `` `) as single tokens even if they contain spaces.\n";
+        let (output, _) = process_content(input, 60);
+        let lines: Vec<&str> = output.lines().collect();
+        // The wrap must not split inside the ` `` ` span
+        assert!(
+            !lines
+                .iter()
+                .any(|l| l.ends_with("` ``") || l.ends_with("`` `")),
+            "backtick span was split across lines: {lines:?}"
+        );
     }
 
     #[test]
