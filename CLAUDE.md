@@ -17,6 +17,10 @@ Single-file Rust CLI tool in `src/main.rs`. No library crate. Binary name: `carg
 
 Uses a two-level clap enum: `CargoCli::WrapComments(Cli)`. This allows `cargo wrap-comments` to work as a cargo subcommand. The `CargoCli` enum has `#[command(name = "cargo")]` and the variant has `#[command(name = "wrap-comments")]`.
 
+### Stdin/Stdout Mode
+
+When no files are specified, reads from stdin and writes processed output to stdout. In `--check` mode with stdin, outputs the diff and exits with code 1 if changes were needed.
+
 ### Processing Pipeline
 
 1. **Parse**: `parse_comment_line()` extracts indent, marker (`//`, `///`, `//!`), and text from each line
