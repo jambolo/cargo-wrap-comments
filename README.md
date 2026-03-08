@@ -14,6 +14,7 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 - Preserves indentation, comment markers, and blank comment lines
 - Respects hierarchical markers (`#`, `*`, `-`, `1.`, `A.`, `a.`), back-tick quoted text, and code blocks
 - Glob pattern support for processing multiple files
+- Stdin/stdout mode when no files are specified
 - Check mode for previewing changes without modifying files
 
 ## Installation
@@ -49,6 +50,10 @@ cargo wrap-comments --max-width 80 src/main.rs
 
 # Preview changes without modifying files
 cargo wrap-comments --check src/main.rs
+
+# Read from stdin, write to stdout
+cat src/main.rs | cargo wrap-comments
+cargo wrap-comments < src/main.rs
 ```
 
 ## Options

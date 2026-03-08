@@ -38,6 +38,11 @@ fn quiet_long_flag_suppresses_output_when_file_modified() {
         "expected no stdout with --quiet, got: {:?}",
         String::from_utf8_lossy(&output.stdout)
     );
+    assert!(
+        output.stderr.is_empty(),
+        "expected no stderr with --quiet, got: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -53,6 +58,11 @@ fn quiet_short_flag_suppresses_output_when_file_modified() {
         "expected no stdout with -q, got: {:?}",
         String::from_utf8_lossy(&output.stdout)
     );
+    assert!(
+        output.stderr.is_empty(),
+        "expected no stderr with -q, got: {:?}",
+        String::from_utf8_lossy(&output.stderr)
+    );
 }
 
 #[test]
@@ -67,6 +77,11 @@ fn quiet_suppresses_output_when_no_changes() {
         output.stdout.is_empty(),
         "expected no stdout with --quiet when no changes, got: {:?}",
         String::from_utf8_lossy(&output.stdout)
+    );
+    assert!(
+        output.stderr.is_empty(),
+        "expected no stderr with --quiet when no changes, got: {:?}",
+        String::from_utf8_lossy(&output.stderr)
     );
 }
 
@@ -118,5 +133,5 @@ fn without_quiet_produces_output() {
         .output()
         .unwrap();
     assert!(output.status.success());
-    assert!(!output.stdout.is_empty(), "expected stdout without --quiet");
+    assert!(!output.stderr.is_empty(), "expected stderr without --quiet");
 }

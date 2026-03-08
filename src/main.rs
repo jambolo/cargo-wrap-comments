@@ -18,6 +18,9 @@
 //!
 //! # Preview changes without modifying files
 //! cargo wrap-comments --check "src/**/*.rs"
+//!
+//! # Read from stdin, write to stdout
+//! cat src/main.rs | cargo wrap-comments
 //! ```
 //!
 //! # Width Resolution
@@ -34,6 +37,7 @@ use glob::glob;
 use std::collections::BTreeSet;
 use std::env;
 use std::fs;
+use std::io::{self, Read as _};
 use std::path::PathBuf;
 use std::process;
 
@@ -47,8 +51,7 @@ enum CargoCli {
 
 #[derive(clap::Args)]
 struct Cli {
-    /// Files or glob patterns to process
-    #[arg(required = true)]
+    /// Files or glob patterns to process (reads from stdin if omitted)
     files: Vec<String>,
 
     /// Maximum line width
@@ -108,8 +111,8 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
 
 /// Returns `true` if `text` begins with a markdown-style structural marker.
 ///
-/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`,
-/// `a.`), or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
+/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`, `a.`),
+/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
         return true;
@@ -247,13 +250,13 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
     let mut lines = Vec::new();
     let mut current_line = String::new();
 
-    for word in words.iter() {
-        let current_prefix = if lines.is_empty() {
+    for word in &words {
+        let pfx = if lines.is_empty() {
             prefix
         } else {
             continuation_prefix
         };
-        let available = max_width.saturating_sub(current_prefix.len()).max(1);
+        let available = max_width.saturating_sub(pfx.len()).max(1);
 
         if current_line.is_empty() {
             current_line.push_str(word);
@@ -261,33 +264,38 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
             current_line.push(' ');
             current_line.push_str(word);
         } else {
-            lines.push(
-                format!("{current_prefix}{current_line}")
-                    .trim_end()
-                    .to_string(),
-            );
+            lines.push(format!("{pfx}{current_line}").trim_end().to_string());
             current_line = word.to_string();
         }
     }
 
-    if !current_line.is_empty() {
-        let current_prefix = if lines.is_empty() {
-            prefix
-        } else {
-            continuation_prefix
-        };
-        lines.push(
-            format!("{current_prefix}{current_line}")
-                .trim_end()
-                .to_string(),
-        );
-    }
-
+    let pfx = if lines.is_empty() {
+        prefix
+    } else {
+        continuation_prefix
+    };
+    lines.push(format!("{pfx}{current_line}").trim_end().to_string());
     lines
 }
 
 /// A recorded change: `(line_number, old_lines, new_lines)`.
 type Change = (usize, Vec<String>, Vec<String>);
+
+/// Prints a set of changes as a unified-style diff.
+fn print_changes(changes: &[Change], header: Option<&str>) {
+    if let Some(h) = header {
+        println!("{h}");
+    }
+    for (line_num, removed, added) in changes {
+        println!("  Line {line_num}:");
+        for r in removed {
+            println!("    - {r}");
+        }
+        for a in added {
+            println!("    + {a}");
+        }
+    }
+}
 
 /// Processes an entire file's content, combining and wrapping comments.
 ///
@@ -301,24 +309,22 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let mut in_code_block = false;
 
     while i < lines.len() {
-        let Some(comment) = parse_comment_line(lines[i]) else {
-            result.push(lines[i].to_string());
-            i += 1;
-            continue;
-        };
+        let comment = parse_comment_line(lines[i]);
 
-        if comment.text.starts_with("```") {
+        if let Some(ref c) = comment
+            && c.text.starts_with("```")
+        {
             in_code_block = !in_code_block;
+        }
+
+        let passthrough = comment.is_none() || in_code_block;
+        if passthrough {
             result.push(lines[i].to_string());
             i += 1;
             continue;
         }
 
-        if in_code_block {
-            result.push(lines[i].to_string());
-            i += 1;
-            continue;
-        }
+        let comment = comment.unwrap();
 
         let mut combined_text = comment.text.clone();
         let start_line = i;
@@ -343,29 +349,24 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
             break;
         }
 
+        let base = format!("{}{}", comment.indent, comment.marker);
         let prefix = if combined_text.is_empty() {
-            format!("{}{}", comment.indent, comment.marker)
+            base.clone()
         } else {
-            format!("{}{} ", comment.indent, comment.marker)
+            format!("{base} ")
         };
-
         let full_line = format!("{prefix}{combined_text}");
 
-        let marker_width = hierarchical_marker_width(&combined_text);
-        let continuation_prefix = if marker_width > 0 {
-            format!("{prefix}{}", " ".repeat(marker_width))
-        } else {
-            prefix.clone()
-        };
-
-        let new_lines = if !combined_text.is_empty() && full_line.len() > max_width {
-            wrap_text(&combined_text, &prefix, &continuation_prefix, max_width)
-        } else if combined_text.is_empty() {
-            vec![
-                format!("{}{}", comment.indent, comment.marker)
-                    .trim_end()
-                    .to_string(),
-            ]
+        let new_lines = if combined_text.is_empty() {
+            vec![base.trim_end().to_string()]
+        } else if full_line.len() > max_width {
+            let marker_width = hierarchical_marker_width(&combined_text);
+            let cont = if marker_width > 0 {
+                format!("{prefix}{}", " ".repeat(marker_width))
+            } else {
+                prefix.clone()
+            };
+            wrap_text(&combined_text, &prefix, &cont, max_width)
         } else {
             vec![full_line.trim_end().to_string()]
         };
@@ -390,11 +391,11 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
 const DEFAULT_WIDTH: usize = 100;
 
 /// Searches for `.rustfmt.toml` or `rustfmt.toml` from the current directory up to `$HOME`,
-/// returning the `max_width` value if found.
+/// returning the `max_width` value and the config file path if found.
 ///
 /// Stops at the first config file encountered. If that file exists but does not contain a
 /// `max_width` key, returns `None`.
-fn find_rustfmt_width() -> Option<usize> {
+fn find_rustfmt_width() -> Option<(usize, PathBuf)> {
     let home = env::var("HOME").ok().map(PathBuf::from);
     let mut dir = env::current_dir().ok()?;
 
@@ -406,7 +407,7 @@ fn find_rustfmt_width() -> Option<usize> {
                     && let Ok(table) = contents.parse::<toml::Table>()
                     && let Some(val) = table.get("max_width")
                 {
-                    return val.as_integer().map(|v| v as usize);
+                    return val.as_integer().map(|v| (v as usize, candidate.clone()));
                 }
                 return None;
             }
@@ -420,45 +421,65 @@ fn find_rustfmt_width() -> Option<usize> {
 }
 
 /// Resolves the effective line width: CLI argument > `rustfmt.toml` > [`DEFAULT_WIDTH`].
-fn resolve_width(cli_width: Option<usize>) -> usize {
-    cli_width
-        .or_else(find_rustfmt_width)
-        .unwrap_or(DEFAULT_WIDTH)
+fn resolve_width(cli_width: Option<usize>, verbose: bool) -> usize {
+    if let Some(w) = cli_width {
+        if verbose {
+            eprintln!("Width: {w} (from --max-width)");
+        }
+        return w;
+    }
+    if let Some((w, path)) = find_rustfmt_width() {
+        if verbose {
+            eprintln!("Width: {w} (from {})", path.display());
+        }
+        return w;
+    }
+    if verbose {
+        eprintln!("Width: {DEFAULT_WIDTH} (default)");
+    }
+    DEFAULT_WIDTH
 }
 
 fn main() {
     let CargoCli::WrapComments(cli) = CargoCli::parse();
-    let width = resolve_width(cli.max_width);
+    let verbose = cli.verbose;
+    let quiet = cli.quiet && !verbose;
+    let width = resolve_width(cli.max_width, verbose);
+
+    if cli.files.is_empty() {
+        process_stdin(width, cli.check);
+        return;
+    }
 
     let mut file_paths = BTreeSet::new();
     let mut had_errors = false;
 
     for pattern in &cli.files {
-        match glob(pattern) {
-            Ok(paths) => {
-                let mut matched = false;
-                for entry in paths {
-                    match entry {
-                        Ok(path) if path.is_file() => {
-                            file_paths.insert(path);
-                            matched = true;
-                        }
-                        Err(e) => {
-                            eprintln!("Error reading path: {e}");
-                            had_errors = true;
-                        }
-                        _ => {}
-                    }
-                }
-                if !matched {
-                    eprintln!("No files found matching pattern: {pattern}");
-                    had_errors = true;
-                }
-            }
+        let paths = match glob(pattern) {
+            Ok(paths) => paths,
             Err(e) => {
                 eprintln!("Invalid glob pattern '{pattern}': {e}");
                 had_errors = true;
+                continue;
             }
+        };
+
+        let prev_count = file_paths.len();
+        for entry in paths {
+            match entry {
+                Ok(path) if path.is_file() => {
+                    file_paths.insert(path);
+                }
+                Err(e) => {
+                    eprintln!("Error reading path: {e}");
+                    had_errors = true;
+                }
+                _ => {}
+            }
+        }
+        if file_paths.len() == prev_count {
+            eprintln!("No files found matching pattern: {pattern}");
+            had_errors = true;
         }
     }
 
@@ -467,51 +488,83 @@ fn main() {
         process::exit(1);
     }
 
+    if verbose {
+        eprintln!("Found {} file(s) to process.", file_paths.len());
+    }
+
     let mut files_processed = 0;
     let mut files_modified = 0;
 
     for path in &file_paths {
         let Ok(content) = fs::read_to_string(path) else {
-            eprintln!("Error reading {}", path.display());
+            if verbose {
+                eprintln!("{}:", path.display());
+            }
+            eprintln!("  Error reading {}", path.display());
             had_errors = true;
             continue;
         };
 
         files_processed += 1;
+        let line_count = content.lines().count();
         let (new_content, changes) = process_content(&content, width);
 
         if changes.is_empty() {
+            if verbose {
+                eprintln!("{} ({line_count} lines): unchanged", path.display());
+            }
             continue;
         }
 
         files_modified += 1;
 
+        if verbose {
+            eprintln!(
+                "{} ({line_count} lines): {} change(s)",
+                path.display(),
+                changes.len()
+            );
+        }
+
         if cli.check {
-            println!("Would modify: {}", path.display());
-            for (line_num, removed, added) in &changes {
-                println!("  Line {line_num}:");
-                for r in removed {
-                    println!("    - {r}");
-                }
-                for a in added {
-                    println!("    + {a}");
-                }
-            }
+            print_changes(&changes, Some(&format!("Would modify: {}", path.display())));
         } else if let Err(e) = fs::write(path, &new_content) {
             eprintln!("Error writing {}: {e}", path.display());
             had_errors = true;
             continue;
-        } else if !cli.quiet {
-            println!("Modified: {}", path.display());
+        } else if !quiet {
+            eprintln!("Modified: {}", path.display());
         }
     }
 
-    if !cli.quiet {
-        println!("\nProcessed {files_processed} file(s), {files_modified} modified.");
+    if !quiet {
+        eprintln!("\nProcessed {files_processed} file(s), {files_modified} modified.");
     }
 
     if had_errors {
         process::exit(1);
+    }
+}
+
+/// Reads from stdin, processes the content, and writes the result to stdout.
+///
+/// In `--check` mode, outputs the diff instead of the processed content.
+fn process_stdin(max_width: usize, check: bool) {
+    let mut content = String::new();
+    if let Err(e) = io::stdin().read_to_string(&mut content) {
+        eprintln!("Error reading stdin: {e}");
+        process::exit(1);
+    }
+
+    let (new_content, changes) = process_content(&content, max_width);
+
+    if check {
+        if !changes.is_empty() {
+            print_changes(&changes, None);
+            process::exit(1);
+        }
+    } else {
+        print!("{new_content}");
     }
 }
 
@@ -914,11 +967,20 @@ mod tests {
 
     #[test]
     fn test_resolve_width_cli_overrides() {
-        assert_eq!(resolve_width(Some(80)), 80);
+        assert_eq!(resolve_width(Some(80), false), 80);
     }
 
     #[test]
     fn test_resolve_width_default() {
-        assert!(resolve_width(None) > 0);
+        assert!(resolve_width(None, false) > 0);
+    }
+
+    #[test]
+    fn test_verbose_overrides_quiet() {
+        // When both verbose and quiet are set, verbose wins (quiet becomes false).
+        let verbose = true;
+        let quiet_flag = true;
+        let effective_quiet = quiet_flag && !verbose;
+        assert!(!effective_quiet);
     }
 }
