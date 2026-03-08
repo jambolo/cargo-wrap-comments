@@ -47,6 +47,7 @@ Two adjacent comment lines are joined into one when ALL of these hold:
 3. Neither line has empty text (blank comments are paragraph separators)
 4. Next line does not start with a hierarchical marker
 5. Current line does not contain a code fence (`` ``` ``)
+6. Current line does not start with `#` (markdown heading lines are not combined with the text that follows)
 
 Lines inside a code block (between `` ``` `` toggles) are never joined or wrapped.
 
@@ -59,6 +60,8 @@ These patterns at the start of comment text prevent joining with the previous li
 - `` ``` `` (code fences)
 - One or more digits followed by `.` (e.g. `1.`, `10.`, `100.`)
 - Single letter followed by `.` (e.g. `A.`, `a.`)
+
+Additionally, a line that starts with `#` is treated as a heading and is not joined with the line that follows.
 
 ### Wrapping Rules (`wrap_text()`)
 

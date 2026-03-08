@@ -13,12 +13,7 @@ fn run_stdin(input: &str, args: &[&str]) -> std::process::Output {
         .stderr(Stdio::piped())
         .spawn()
         .unwrap();
-    child
-        .stdin
-        .take()
-        .unwrap()
-        .write_all(input.as_bytes())
-        .unwrap();
+    child.stdin.take().unwrap().write_all(input.as_bytes()).unwrap();
     child.wait_with_output().unwrap()
 }
 
@@ -27,7 +22,7 @@ fn run_stdin(input: &str, args: &[&str]) -> std::process::Output {
 #[test]
 fn stdin_passes_through_unchanged_content() {
     let input = "// short\nfn main() {}\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), input);
 }
@@ -39,18 +34,14 @@ fn stdin_wraps_long_comment() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        assert!(
-            line.len() <= 40,
-            "line exceeds width 40: {line:?} (len={})",
-            line.len()
-        );
+        assert!(line.len() <= 40, "line exceeds width 40: {line:?} (len={})", line.len());
     }
 }
 
 #[test]
 fn stdin_combines_consecutive_comments() {
     let input = "// hello\n// world\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "// hello world\n");
 }
@@ -58,7 +49,7 @@ fn stdin_combines_consecutive_comments() {
 #[test]
 fn stdin_preserves_non_comments() {
     let input = "let x = 5;\nlet y = 10;\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), input);
 }
@@ -66,7 +57,7 @@ fn stdin_preserves_non_comments() {
 #[test]
 fn stdin_preserves_blank_comment_separator() {
     let input = "// line one\n//\n// line two\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), input);
 }
@@ -82,7 +73,7 @@ fn stdin_preserves_code_blocks() {
 #[test]
 fn stdin_does_not_combine_inside_code_blocks() {
     let input = "// ```\n// line one\n// line two\n// ```\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), input);
 }
@@ -90,7 +81,7 @@ fn stdin_does_not_combine_inside_code_blocks() {
 #[test]
 fn stdin_resumes_combining_after_code_block() {
     let input = "// ```\n// code\n// ```\n// hello\n// world\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(
         String::from_utf8_lossy(&output.stdout),
@@ -101,7 +92,7 @@ fn stdin_resumes_combining_after_code_block() {
 #[test]
 fn stdin_preserves_different_indentation() {
     let input = "    // indented\n// not indented\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), input);
 }
@@ -109,7 +100,7 @@ fn stdin_preserves_different_indentation() {
 #[test]
 fn stdin_does_not_combine_different_markers() {
     let input = "// regular\n/// doc\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), input);
 }
@@ -117,7 +108,7 @@ fn stdin_does_not_combine_different_markers() {
 #[test]
 fn stdin_does_not_combine_before_hierarchical_marker() {
     let input = "// first line\n// - bullet\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), input);
 }
@@ -135,8 +126,7 @@ fn stdin_wraps_bullet_with_continuation_indent() {
 
 #[test]
 fn stdin_wraps_numbered_with_continuation_indent() {
-    let input =
-        "// 1. This is a very long numbered item that should wrap with proper indentation\n";
+    let input = "// 1. This is a very long numbered item that should wrap with proper indentation\n";
     let output = run_stdin(input, &["wrap-comments", "-w", "40"]);
     assert!(output.status.success());
     assert_eq!(
@@ -147,8 +137,7 @@ fn stdin_wraps_numbered_with_continuation_indent() {
 
 #[test]
 fn stdin_wraps_multi_digit_numbered_with_continuation_indent() {
-    let input =
-        "// 10. This is a very long numbered item that should wrap with proper indentation\n";
+    let input = "// 10. This is a very long numbered item that should wrap with proper indentation\n";
     let output = run_stdin(input, &["wrap-comments", "-w", "40"]);
     assert!(output.status.success());
     assert_eq!(
@@ -159,8 +148,7 @@ fn stdin_wraps_multi_digit_numbered_with_continuation_indent() {
 
 #[test]
 fn stdin_no_trailing_spaces() {
-    let input =
-        "//\n// This is a long comment that needs to be wrapped because it exceeds the width\n";
+    let input = "//\n// This is a long comment that needs to be wrapped because it exceeds the width\n";
     let output = run_stdin(input, &["wrap-comments", "-w", "40"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -184,16 +172,12 @@ fn stdin_preserves_backtick_spans() {
 
 #[test]
 fn stdin_handles_doc_comments() {
-    let input =
-        "/// This is a very long doc comment that should be wrapped at a reasonable width.\n";
+    let input = "/// This is a very long doc comment that should be wrapped at a reasonable width.\n";
     let output = run_stdin(input, &["wrap-comments", "-w", "40"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        assert!(
-            line.starts_with("///"),
-            "expected doc comment marker: {line:?}"
-        );
+        assert!(line.starts_with("///"), "expected doc comment marker: {line:?}");
     }
 }
 
@@ -204,17 +188,13 @@ fn stdin_handles_bang_comments() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        assert!(
-            line.starts_with("//!"),
-            "expected bang comment marker: {line:?}"
-        );
+        assert!(line.starts_with("//!"), "expected bang comment marker: {line:?}");
     }
 }
 
 #[test]
 fn stdin_handles_mixed_code_and_comments() {
-    let input =
-        "fn foo() {\n    // This is a comment that is long enough to wrap\n    let x = 42;\n}\n";
+    let input = "fn foo() {\n    // This is a comment that is long enough to wrap\n    let x = 42;\n}\n";
     let output = run_stdin(input, &["wrap-comments", "-w", "30"]);
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
@@ -224,7 +204,7 @@ fn stdin_handles_mixed_code_and_comments() {
 
 #[test]
 fn stdin_handles_empty_input() {
-    let output = run_stdin("", &["wrap-comments"]);
+    let output = run_stdin("", &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "");
 }
@@ -232,7 +212,7 @@ fn stdin_handles_empty_input() {
 #[test]
 fn stdin_handles_no_trailing_newline() {
     let input = "// hello\n// world";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "// hello world");
 }
@@ -242,7 +222,7 @@ fn stdin_handles_no_trailing_newline() {
 #[test]
 fn stdin_check_no_changes_exits_success() {
     let input = "// short\n";
-    let output = run_stdin(input, &["wrap-comments", "--check"]);
+    let output = run_stdin(input, &["wrap-comments", "--check", "-w", "100"]);
     assert!(output.status.success());
     assert!(output.stdout.is_empty());
 }
@@ -259,21 +239,12 @@ fn stdin_check_with_changes_exits_failure() {
 #[test]
 fn stdin_check_shows_diff() {
     let input = "// hello\n// world\n";
-    let output = run_stdin(input, &["wrap-comments", "--check"]);
+    let output = run_stdin(input, &["wrap-comments", "--check", "-w", "100"]);
     assert!(!output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("- // hello"),
-        "expected removed line: {stdout}"
-    );
-    assert!(
-        stdout.contains("- // world"),
-        "expected removed line: {stdout}"
-    );
-    assert!(
-        stdout.contains("+ // hello world"),
-        "expected added line: {stdout}"
-    );
+    assert!(stdout.contains("- // hello"), "expected removed line: {stdout}");
+    assert!(stdout.contains("- // world"), "expected removed line: {stdout}");
+    assert!(stdout.contains("+ // hello world"), "expected added line: {stdout}");
 }
 
 // --- Width flag with stdin ---
@@ -285,11 +256,7 @@ fn stdin_respects_max_width_flag() {
     assert!(output.status.success());
     let stdout = String::from_utf8_lossy(&output.stdout);
     for line in stdout.lines() {
-        assert!(
-            line.len() <= 20,
-            "line exceeds width 20: {line:?} (len={})",
-            line.len()
-        );
+        assert!(line.len() <= 20, "line exceeds width 20: {line:?} (len={})", line.len());
     }
 }
 
@@ -298,13 +265,10 @@ fn stdin_respects_max_width_flag() {
 #[test]
 fn stdin_no_summary_on_stderr() {
     let input = "// hello\n// world\n";
-    let output = run_stdin(input, &["wrap-comments"]);
+    let output = run_stdin(input, &["wrap-comments", "-w", "100"]);
     assert!(output.status.success());
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("Processed"),
-        "stdin mode should not print summary: {stderr}"
-    );
+    assert!(!stderr.contains("Processed"), "stdin mode should not print summary: {stderr}");
 }
 
 // --- Heading wrapping ---

@@ -27,18 +27,19 @@ fn verbose_shows_width_from_cli_arg() {
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Width: 80 (from --max-width)"),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("Width: 80 (from --max-width)"), "stderr: {stderr}");
 }
 
 #[test]
 fn verbose_shows_default_width() {
+    let dir = std::env::temp_dir().join("cargo-wrap-comments-verbose-tests");
+    fs::create_dir_all(&dir).unwrap();
     let path = create_temp_file("v_width_default.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v"])
         .arg(&path)
+        .current_dir(&dir)
+        .env("HOME", &dir)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -51,15 +52,12 @@ fn verbose_shows_default_width() {
 fn verbose_shows_file_count() {
     let path = create_temp_file("v_count.rs", SHORT);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check", "-v"])
+        .args(["wrap-comments", "--check", "-v", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Found 1 file(s) to process."),
-        "stderr: {stderr}"
-    );
+    assert!(stderr.contains("Found 1 file(s) to process."), "stderr: {stderr}");
 }
 
 // --- Per-file status ---
@@ -68,7 +66,7 @@ fn verbose_shows_file_count() {
 fn verbose_unchanged_file_single_line() {
     let path = create_temp_file("v_unchanged.rs", SHORT);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check", "-v"])
+        .args(["wrap-comments", "--check", "-v", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
@@ -85,7 +83,7 @@ fn verbose_unchanged_file_single_line() {
 fn verbose_modified_file_single_line() {
     let path = create_temp_file("v_modified.rs", WRAPPABLE);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check", "-v"])
+        .args(["wrap-comments", "--check", "-v", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
@@ -104,47 +102,34 @@ fn verbose_modified_file_single_line() {
 fn check_diff_output_on_stdout() {
     let path = create_temp_file("v_stdout.rs", WRAPPABLE);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check"])
+        .args(["wrap-comments", "--check", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
-    assert!(
-        stdout.contains("Would modify:"),
-        "check output should be on stdout: {stdout}"
-    );
+    assert!(stdout.contains("Would modify:"), "check output should be on stdout: {stdout}");
 }
 
 #[test]
 fn modified_message_on_stderr() {
     let path = create_temp_file("v_stderr.rs", WRAPPABLE);
-    let output = cargo_bin()
-        .args(["wrap-comments"])
-        .arg(&path)
-        .output()
-        .unwrap();
+    let output = cargo_bin().args(["wrap-comments", "-w", "100"]).arg(&path).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stdout.is_empty(), "stdout should be empty: {stdout}");
-    assert!(
-        stderr.contains("Modified:"),
-        "Modified should be on stderr: {stderr}"
-    );
+    assert!(stderr.contains("Modified:"), "Modified should be on stderr: {stderr}");
 }
 
 #[test]
 fn summary_on_stderr() {
     let path = create_temp_file("v_summary.rs", SHORT);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check"])
+        .args(["wrap-comments", "--check", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("Processed"),
-        "summary should be on stderr: {stderr}"
-    );
+    assert!(stderr.contains("Processed"), "summary should be on stderr: {stderr}");
 }
 
 // --- Quiet ---
@@ -153,15 +138,12 @@ fn summary_on_stderr() {
 fn quiet_suppresses_summary() {
     let path = create_temp_file("v_quiet.rs", SHORT);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check", "-q"])
+        .args(["wrap-comments", "--check", "-q", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("Processed"),
-        "quiet should suppress summary: {stderr}"
-    );
+    assert!(!stderr.contains("Processed"), "quiet should suppress summary: {stderr}");
 }
 
 // --- Verbose overrides quiet ---
@@ -170,7 +152,7 @@ fn quiet_suppresses_summary() {
 fn verbose_overrides_quiet() {
     let path = create_temp_file("v_override.rs", SHORT);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check", "-v", "-q"])
+        .args(["wrap-comments", "--check", "-v", "-q", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
@@ -179,14 +161,8 @@ fn verbose_overrides_quiet() {
         stderr.contains("Processed"),
         "verbose should override quiet for summary: {stderr}"
     );
-    assert!(
-        stderr.contains("Width:"),
-        "verbose should show width: {stderr}"
-    );
-    assert!(
-        stderr.contains("Found"),
-        "verbose should show file count: {stderr}"
-    );
+    assert!(stderr.contains("Width:"), "verbose should show width: {stderr}");
+    assert!(stderr.contains("Found"), "verbose should show file count: {stderr}");
 }
 
 // --- No verbose by default ---
@@ -195,19 +171,13 @@ fn verbose_overrides_quiet() {
 fn no_verbose_hides_details() {
     let path = create_temp_file("v_noverbose.rs", SHORT);
     let output = cargo_bin()
-        .args(["wrap-comments", "--check"])
+        .args(["wrap-comments", "--check", "-w", "100"])
         .arg(&path)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("Width:"),
-        "should not show width without -v: {stderr}"
-    );
-    assert!(
-        !stderr.contains("Found"),
-        "should not show file count without -v: {stderr}"
-    );
+    assert!(!stderr.contains("Width:"), "should not show width without -v: {stderr}");
+    assert!(!stderr.contains("Found"), "should not show file count without -v: {stderr}");
     assert!(
         !stderr.contains("unchanged"),
         "should not show per-file status without -v: {stderr}"

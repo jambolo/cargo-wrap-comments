@@ -147,8 +147,7 @@ fn hierarchical_marker_width(text: &str) -> usize {
             return hashes + 1;
         }
     }
-    if matches!(text.as_bytes().first(), Some(b'-' | b'*')) && text.as_bytes().get(1) == Some(&b' ')
-    {
+    if matches!(text.as_bytes().first(), Some(b'-' | b'*')) && text.as_bytes().get(1) == Some(&b' ') {
         return 2;
     }
     let bytes = text.as_bytes();
@@ -174,7 +173,8 @@ fn hierarchical_marker_width(text: &str) -> usize {
 /// Determines whether two adjacent comment lines should be combined.
 ///
 /// Lines are combined when they share the same marker and indentation, neither is blank, the next
-/// line doesn't start with a hierarchical marker, and neither line contains a code fence.
+/// line doesn't start with a hierarchical marker, the current line doesn't contain a code fence,
+/// and a markdown heading line (starting with `#`) is not combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
@@ -182,6 +182,7 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !next.text.is_empty()
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
+        && !current.text.starts_with('#')
 }
 
 /// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or
@@ -251,11 +252,7 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
     let mut current_line = String::new();
 
     for word in &words {
-        let pfx = if lines.is_empty() {
-            prefix
-        } else {
-            continuation_prefix
-        };
+        let pfx = if lines.is_empty() { prefix } else { continuation_prefix };
         let available = max_width.saturating_sub(pfx.len()).max(1);
 
         if current_line.is_empty() {
@@ -269,11 +266,7 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
         }
     }
 
-    let pfx = if lines.is_empty() {
-        prefix
-    } else {
-        continuation_prefix
-    };
+    let pfx = if lines.is_empty() { prefix } else { continuation_prefix };
     lines.push(format!("{pfx}{current_line}").trim_end().to_string());
     lines
 }
@@ -519,11 +512,7 @@ fn main() {
         files_modified += 1;
 
         if verbose {
-            eprintln!(
-                "{} ({line_count} lines): {} change(s)",
-                path.display(),
-                changes.len()
-            );
+            eprintln!("{} ({line_count} lines): {} change(s)", path.display(), changes.len());
         }
 
         if cli.check {
@@ -679,6 +668,29 @@ mod tests {
     }
 
     #[test]
+    fn test_no_combine_heading_with_next() {
+        let a = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "# Heading".into(),
+        };
+        let b = CommentLine {
+            indent: "".into(),
+            marker: "//".into(),
+            text: "some text".into(),
+        };
+        assert!(!can_combine(&a, &b));
+    }
+
+    #[test]
+    fn test_no_combine_heading_process() {
+        let input = "// # Heading\n// some text after heading\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
     fn test_wrap_text() {
         let result = wrap_text("hello world foo bar baz", "// ", "// ", 15);
         assert_eq!(result, vec!["// hello world", "// foo bar baz"]);
@@ -694,10 +706,7 @@ mod tests {
     fn test_combines_and_wraps() {
         let input = "// This is a long comment that\n// should be combined\n";
         let (output, changes) = process_content(input, 40);
-        assert_eq!(
-            output,
-            "// This is a long comment that should be\n// combined\n"
-        );
+        assert_eq!(output, "// This is a long comment that should be\n// combined\n");
         assert!(!changes.is_empty());
     }
 
@@ -784,8 +793,7 @@ mod tests {
 
     #[test]
     fn test_process_content_wraps_multi_digit_numbered_with_indent() {
-        let input =
-            "// 10. This is a very long numbered item that should wrap with proper indentation\n";
+        let input = "// 10. This is a very long numbered item that should wrap with proper indentation\n";
         let (output, _) = process_content(input, 40);
         assert_eq!(
             output,
@@ -810,25 +818,18 @@ mod tests {
     #[test]
     fn test_wrap_hierarchical_marker_indent() {
         let result = wrap_text("- this is a long bullet point text", "// ", "//   ", 30);
-        assert_eq!(
-            result,
-            vec!["// - this is a long bullet", "//   point text"]
-        );
+        assert_eq!(result, vec!["// - this is a long bullet", "//   point text"]);
     }
 
     #[test]
     fn test_wrap_numbered_list_indent() {
         let result = wrap_text("1. this is a long numbered item text", "// ", "//    ", 30);
-        assert_eq!(
-            result,
-            vec!["// 1. this is a long numbered", "//    item text"]
-        );
+        assert_eq!(result, vec!["// 1. this is a long numbered", "//    item text"]);
     }
 
     #[test]
     fn test_process_content_wraps_bullet_with_indent() {
-        let input =
-            "// - This is a very long bullet point that should wrap with proper indentation\n";
+        let input = "// - This is a very long bullet point that should wrap with proper indentation\n";
         let (output, changes) = process_content(input, 40);
         assert_eq!(
             output,
@@ -839,8 +840,7 @@ mod tests {
 
     #[test]
     fn test_process_content_wraps_numbered_with_indent() {
-        let input =
-            "// 1. This is a very long numbered item that should wrap with proper indentation\n";
+        let input = "// 1. This is a very long numbered item that should wrap with proper indentation\n";
         let (output, _) = process_content(input, 40);
         assert_eq!(
             output,
@@ -859,8 +859,7 @@ mod tests {
 
     #[test]
     fn test_no_trailing_spaces_after_wrap() {
-        let input =
-            "// This is a long comment that needs to be wrapped because it exceeds the width\n";
+        let input = "// This is a long comment that needs to be wrapped because it exceeds the width\n";
         let (output, _) = process_content(input, 40);
         for line in output.lines() {
             assert_eq!(line, line.trim_end(), "trailing spaces in: {:?}", line);
@@ -869,8 +868,7 @@ mod tests {
 
     #[test]
     fn test_no_trailing_spaces_doc_comment() {
-        let input =
-            "///\n/// Some doc text that is long enough to wrap around to the next line easily\n";
+        let input = "///\n/// Some doc text that is long enough to wrap around to the next line easily\n";
         let (output, _) = process_content(input, 40);
         for line in output.lines() {
             assert_eq!(line, line.trim_end(), "trailing spaces in: {:?}", line);
@@ -934,10 +932,7 @@ mod tests {
     #[test]
     fn test_tokenize_single_backtick_not_closed_by_double() {
         // ` `` ` is a single-backtick span containing `` (space-double-backtick-space)
-        assert_eq!(
-            tokenize_preserving_backticks("` `` ` rest"),
-            vec!["` `` `", "rest"]
-        );
+        assert_eq!(tokenize_preserving_backticks("` `` ` rest"), vec!["` `` `", "rest"]);
     }
 
     #[test]
@@ -958,9 +953,7 @@ mod tests {
         let lines: Vec<&str> = output.lines().collect();
         // The wrap must not split inside the ` `` ` span
         assert!(
-            !lines
-                .iter()
-                .any(|l| l.ends_with("` ``") || l.ends_with("`` `")),
+            !lines.iter().any(|l| l.ends_with("` ``") || l.ends_with("`` `")),
             "backtick span was split across lines: {lines:?}"
         );
     }

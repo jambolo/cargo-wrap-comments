@@ -14,7 +14,8 @@ fn create_temp_file(name: &str, content: &str) -> std::path::PathBuf {
 }
 
 // A comment long enough to be wrapped at width 40.
-const WRAPPABLE_CONTENT: &str = "// This is a long comment that should definitely be wrapped when the max width is set to forty characters.\n";
+const WRAPPABLE_CONTENT: &str =
+    "// This is a long comment that should definitely be wrapped when the max width is set to forty characters.\n";
 
 // Content that needs no wrapping.
 const UNCHANGED_CONTENT: &str = "// short\nfn main() {}\n";
@@ -23,13 +24,7 @@ const UNCHANGED_CONTENT: &str = "// short\nfn main() {}\n";
 fn quiet_long_flag_suppresses_output_when_file_modified() {
     let path = create_temp_file("quiet_long.rs", WRAPPABLE_CONTENT);
     let output = cargo_bin()
-        .args([
-            "wrap-comments",
-            "--quiet",
-            "-w",
-            "40",
-            path.to_str().unwrap(),
-        ])
+        .args(["wrap-comments", "--quiet", "-w", "40", path.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -69,7 +64,7 @@ fn quiet_short_flag_suppresses_output_when_file_modified() {
 fn quiet_suppresses_output_when_no_changes() {
     let path = create_temp_file("quiet_nochange.rs", UNCHANGED_CONTENT);
     let output = cargo_bin()
-        .args(["wrap-comments", "--quiet", path.to_str().unwrap()])
+        .args(["wrap-comments", "--quiet", "-w", "100", path.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(output.status.success());
@@ -89,14 +84,7 @@ fn quiet_suppresses_output_when_no_changes() {
 fn quiet_with_check_still_produces_output() {
     let path = create_temp_file("quiet_check.rs", WRAPPABLE_CONTENT);
     let output = cargo_bin()
-        .args([
-            "wrap-comments",
-            "--quiet",
-            "--check",
-            "-w",
-            "40",
-            path.to_str().unwrap(),
-        ])
+        .args(["wrap-comments", "--quiet", "--check", "-w", "40", path.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(
@@ -109,14 +97,7 @@ fn quiet_with_check_still_produces_output() {
 fn quiet_short_with_check_still_produces_output() {
     let path = create_temp_file("quiet_short_check.rs", WRAPPABLE_CONTENT);
     let output = cargo_bin()
-        .args([
-            "wrap-comments",
-            "-q",
-            "--check",
-            "-w",
-            "40",
-            path.to_str().unwrap(),
-        ])
+        .args(["wrap-comments", "-q", "--check", "-w", "40", path.to_str().unwrap()])
         .output()
         .unwrap();
     assert!(
