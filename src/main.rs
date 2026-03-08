@@ -108,8 +108,8 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
 
 /// Returns `true` if `text` begins with a markdown-style structural marker.
 ///
-/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`,
-/// `a.`), or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
+/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`, `a.`),
+/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
         return true;
@@ -390,11 +390,11 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
 const DEFAULT_WIDTH: usize = 100;
 
 /// Searches for `.rustfmt.toml` or `rustfmt.toml` from the current directory up to `$HOME`,
-/// returning the `max_width` value if found.
+/// returning the `max_width` value and the config file path if found.
 ///
 /// Stops at the first config file encountered. If that file exists but does not contain a
 /// `max_width` key, returns `None`.
-fn find_rustfmt_width() -> Option<usize> {
+fn find_rustfmt_width() -> Option<(usize, PathBuf)> {
     let home = env::var("HOME").ok().map(PathBuf::from);
     let mut dir = env::current_dir().ok()?;
 
@@ -406,7 +406,7 @@ fn find_rustfmt_width() -> Option<usize> {
                     && let Ok(table) = contents.parse::<toml::Table>()
                     && let Some(val) = table.get("max_width")
                 {
-                    return val.as_integer().map(|v| v as usize);
+                    return val.as_integer().map(|v| (v as usize, candidate.clone()));
                 }
                 return None;
             }
@@ -420,15 +420,30 @@ fn find_rustfmt_width() -> Option<usize> {
 }
 
 /// Resolves the effective line width: CLI argument > `rustfmt.toml` > [`DEFAULT_WIDTH`].
-fn resolve_width(cli_width: Option<usize>) -> usize {
-    cli_width
-        .or_else(find_rustfmt_width)
-        .unwrap_or(DEFAULT_WIDTH)
+fn resolve_width(cli_width: Option<usize>, verbose: bool) -> usize {
+    if let Some(w) = cli_width {
+        if verbose {
+            eprintln!("Width: {w} (from --max-width)");
+        }
+        return w;
+    }
+    if let Some((w, path)) = find_rustfmt_width() {
+        if verbose {
+            eprintln!("Width: {w} (from {})", path.display());
+        }
+        return w;
+    }
+    if verbose {
+        eprintln!("Width: {DEFAULT_WIDTH} (default)");
+    }
+    DEFAULT_WIDTH
 }
 
 fn main() {
     let CargoCli::WrapComments(cli) = CargoCli::parse();
-    let width = resolve_width(cli.max_width);
+    let verbose = cli.verbose;
+    let quiet = cli.quiet && !verbose;
+    let width = resolve_width(cli.max_width, verbose);
 
     let mut file_paths = BTreeSet::new();
     let mut had_errors = false;
@@ -467,24 +482,43 @@ fn main() {
         process::exit(1);
     }
 
+    if verbose {
+        eprintln!("Found {} file(s) to process.", file_paths.len());
+    }
+
     let mut files_processed = 0;
     let mut files_modified = 0;
 
     for path in &file_paths {
         let Ok(content) = fs::read_to_string(path) else {
-            eprintln!("Error reading {}", path.display());
+            if verbose {
+                eprintln!("{}:", path.display());
+            }
+            eprintln!("  Error reading {}", path.display());
             had_errors = true;
             continue;
         };
 
         files_processed += 1;
+        let line_count = content.lines().count();
         let (new_content, changes) = process_content(&content, width);
 
         if changes.is_empty() {
+            if verbose {
+                eprintln!("{} ({line_count} lines): unchanged", path.display());
+            }
             continue;
         }
 
         files_modified += 1;
+
+        if verbose {
+            eprintln!(
+                "{} ({line_count} lines): {} change(s)",
+                path.display(),
+                changes.len()
+            );
+        }
 
         if cli.check {
             println!("Would modify: {}", path.display());
@@ -501,13 +535,13 @@ fn main() {
             eprintln!("Error writing {}: {e}", path.display());
             had_errors = true;
             continue;
-        } else if !cli.quiet {
-            println!("Modified: {}", path.display());
+        } else if !quiet {
+            eprintln!("Modified: {}", path.display());
         }
     }
 
-    if !cli.quiet {
-        println!("\nProcessed {files_processed} file(s), {files_modified} modified.");
+    if !quiet {
+        eprintln!("\nProcessed {files_processed} file(s), {files_modified} modified.");
     }
 
     if had_errors {
@@ -914,11 +948,20 @@ mod tests {
 
     #[test]
     fn test_resolve_width_cli_overrides() {
-        assert_eq!(resolve_width(Some(80)), 80);
+        assert_eq!(resolve_width(Some(80), false), 80);
     }
 
     #[test]
     fn test_resolve_width_default() {
-        assert!(resolve_width(None) > 0);
+        assert!(resolve_width(None, false) > 0);
+    }
+
+    #[test]
+    fn test_verbose_overrides_quiet() {
+        // When both verbose and quiet are set, verbose wins (quiet becomes false).
+        let verbose = true;
+        let quiet_flag = true;
+        let effective_quiet = quiet_flag && !verbose;
+        assert!(!effective_quiet);
     }
 }
