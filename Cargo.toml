@@ -7,7 +7,7 @@ repository = "https://github.com/jambolo/cargo-wrap-comments"
 description = "A CLI tool that reformats source code comments to wrap at a specified width."
 
 [dependencies]
-clap = { version = "4.5.60", features = ["derive"] }
+clap = { version = "4.6.0", features = ["derive"] }
 glob = "0.3.3"
 toml = "1.0.4"
 
