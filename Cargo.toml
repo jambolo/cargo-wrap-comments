@@ -9,7 +9,7 @@ description = "A CLI tool that reformats source code comments to wrap at a speci
 [dependencies]
 clap = { version = "4.5.60", features = ["derive"] }
 glob = "0.3.3"
-toml = "1.0.4"
+toml = "1.1.0"
 
 [dev-dependencies]
 tempfile = "3"
