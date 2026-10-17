@@ -202,23 +202,49 @@ fn is_thematic_break(text: &str) -> bool {
     body.chars().all(|c| c == first || c == ' ' || c == '\t') && body.chars().filter(|&c| c == first).count() >= 3
 }
 
+/// Splits a markdown block quote prefix off `text`: one or more `>`, each preceded by up to three spaces and optionally followed
+/// by one space (e.g. `> `, `> > `, `>>`).
+///
+/// Returns the prefix, the quote depth (the number of `>`), and the text after the prefix.
+fn split_quote(text: &str) -> (&str, usize, &str) {
+    let mut depth = 0;
+    let mut end = 0;
+    loop {
+        let rest = &text[end..];
+        let unindented = rest.trim_start_matches(' ');
+        if rest.len() - unindented.len() > 3 {
+            break;
+        }
+        let Some(after) = unindented.strip_prefix('>') else {
+            break;
+        };
+        depth += 1;
+        end = text.len() - after.strip_prefix(' ').unwrap_or(after).len();
+    }
+    (&text[..end], depth, &text[end..])
+}
+
 /// Determines whether two adjacent comment lines should be combined.
 ///
-/// Lines are combined when they share the same marker and indentation, neither is blank, a divider, or a thematic break, the next
-/// line doesn't start with a hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line
-/// (starting with `#`) is not combined with the text that follows.
+/// Lines are combined when they share the same marker, indentation, and block quote depth, and the following rules hold for the
+/// text after any block quote prefix: neither is blank, a divider, or a thematic break, the next line doesn't start with a
+/// hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line (starting with `#`) is not
+/// combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
+    let (_, current_depth, current_text) = split_quote(&current.text);
+    let (_, next_depth, next_text) = split_quote(&next.text);
     current.marker == next.marker
         && current.indent == next.indent
-        && !current.text.is_empty()
-        && !next.text.is_empty()
-        && !is_divider(&current.text)
-        && !is_divider(&next.text)
-        && !is_thematic_break(&current.text)
-        && !is_thematic_break(&next.text)
-        && !starts_with_hierarchical_marker(&next.text)
-        && !current.text.contains("```")
-        && !current.text.starts_with('#')
+        && current_depth == next_depth
+        && !current_text.is_empty()
+        && !next_text.is_empty()
+        && !is_divider(current_text)
+        && !is_divider(next_text)
+        && !is_thematic_break(current_text)
+        && !is_thematic_break(next_text)
+        && !starts_with_hierarchical_marker(next_text)
+        && !current_text.contains("```")
+        && !current_text.starts_with('#')
 }
 
 /// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or ` `` ` as single tokens even if
@@ -368,7 +394,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
                 };
                 if can_combine(&current, &next_comment) {
                     combined_text.push(' ');
-                    combined_text.push_str(next_comment.text.trim_start());
+                    combined_text.push_str(split_quote(&next_comment.text).2.trim_start());
                     orig_lines.push(lines[j].to_string());
                     j += 1;
                     continue;
@@ -388,8 +414,8 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         let new_lines = if combined_text.is_empty() {
             vec![base.trim_end().to_string()]
         } else if full_line.len() > max_width {
-            // Leading spaces nest the text (e.g. a sub-list item), so every wrapped line keeps them.
-            let body = combined_text.trim_start();
+            // A block quote prefix and leading spaces (e.g. a sub-list item) nest the text, so every wrapped line keeps them.
+            let body = split_quote(&combined_text).2.trim_start();
             let first = format!("{prefix}{}", &combined_text[..combined_text.len() - body.len()]);
             let cont = format!("{first}{}", " ".repeat(hierarchical_marker_width(body)));
             wrap_text(body, &first, &cont, max_width)
@@ -877,6 +903,63 @@ mod tests {
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_split_quote() {
+        assert_eq!(split_quote("> text"), ("> ", 1, "text"));
+        assert_eq!(split_quote(">text"), (">", 1, "text"));
+        assert_eq!(split_quote("> > text"), ("> > ", 2, "text"));
+        assert_eq!(split_quote(">> text"), (">> ", 2, "text"));
+        assert_eq!(split_quote("   > text"), ("   > ", 1, "text"));
+        assert_eq!(split_quote(">"), (">", 1, ""));
+        assert_eq!(split_quote("    > code"), ("", 0, "    > code"));
+        assert_eq!(split_quote("  text"), ("", 0, "  text"));
+        assert_eq!(split_quote("a > b"), ("", 0, "a > b"));
+    }
+
+    #[test]
+    fn test_combine_and_wrap_block_quote() {
+        let input = "/// > **Note:** The iterator borrows the buffer, so the buffer cannot be modified while the iterator is alive. This is enforced by the borrow checker,\n/// > and the quoted text is split across two lines that both begin with `>`.\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "/// > **Note:** The iterator borrows the buffer, so the buffer cannot be modified while the iterator is alive. This is enforced by\n/// > the borrow checker, and the quoted text is split across two lines that both begin with `>`.\n"
+        );
+        let (again, changes) = process_content(&output, 132);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_different_quote_depths() {
+        let input = "// text\n// > quoted\n// > > nested\n// > quoted again\n// text again\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_blank_quote_line() {
+        let input = "// > one\n// >\n// > two\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_quote_applies_rules_after_prefix() {
+        let input = "// > text\n// > - item\n// > # Heading\n// > more\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_list_item_in_quote() {
+        let input = "// > - aaa bbb ccc ddd\n";
+        let (output, _) = process_content(input, 20);
+        assert_eq!(output, "// > - aaa bbb ccc\n// >   ddd\n");
     }
 
     #[test]
