@@ -74,7 +74,7 @@ fn verbose_unchanged_file_single_line() {
     let line = stderr
         .lines()
         .find(|l| l.contains("unchanged"))
-        .expect(&format!("no unchanged line in stderr: {stderr}"));
+        .unwrap_or_else(|| panic!("no unchanged line in stderr: {stderr}"));
     assert!(line.contains("1 lines"), "missing line count: {line}");
     assert!(line.contains("v_unchanged.rs"), "missing file path: {line}");
 }
@@ -91,7 +91,7 @@ fn verbose_modified_file_single_line() {
     let line = stderr
         .lines()
         .find(|l| l.contains("change(s)"))
-        .expect(&format!("no change(s) line in stderr: {stderr}"));
+        .unwrap_or_else(|| panic!("no change(s) line in stderr: {stderr}"));
     assert!(line.contains("1 lines"), "missing line count: {line}");
     assert!(line.contains("1 change(s)"), "wrong change count: {line}");
 }

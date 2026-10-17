@@ -1,8 +1,7 @@
 //! A CLI tool that reformats source code comments to wrap at a specified width.
 //!
-//! `cargo-wrap-comments` combines consecutive comment lines and re-wraps them to fit within a
-//! configurable line width, similar to what `rustfmt` does for code but applied to `//`, `///`, and
-//! `//!` comments.
+//! `cargo-wrap-comments` combines consecutive comment lines and re-wraps them to fit within a configurable line width, similar to
+//! what `rustfmt` does for code but applied to `//`, `///`, and `//!` comments.
 //!
 //! # Usage
 //!
@@ -28,8 +27,7 @@
 //! The line width is resolved in order:
 //!
 //! 1. `--max-width` CLI argument
-//! 2. `max_width` from `.rustfmt.toml` or `rustfmt.toml` (searched from the current directory up to
-//!    `$HOME`)
+//! 2. `max_width` from `.rustfmt.toml` or `rustfmt.toml` (searched from the current directory up to `$HOME`)
 //! 3. Default: 100
 
 use clap::Parser;
@@ -136,8 +134,7 @@ fn starts_with_hierarchical_marker(text: &str) -> bool {
     false
 }
 
-/// Returns the width of a hierarchical marker prefix (e.g. `- ` → 2, `1. ` → 3, `10. ` → 4,
-/// `## ` → 3).
+/// Returns the width of a hierarchical marker prefix (e.g. `- ` → 2, `1. ` → 3, `10. ` → 4, `## ` → 3).
 ///
 /// Returns 0 if the text does not start with a recognized marker.
 fn hierarchical_marker_width(text: &str) -> usize {
@@ -170,23 +167,35 @@ fn hierarchical_marker_width(text: &str) -> usize {
     0
 }
 
+/// Returns `true` if `text` is a divider: three or more repetitions of a single punctuation character (e.g. `---`, `=====`,
+/// `*****`, `~~~`), optionally separated by spaces.
+fn is_divider(text: &str) -> bool {
+    let mut chars = text.chars().filter(|c| !c.is_whitespace());
+    let Some(first) = chars.next() else {
+        return false;
+    };
+    first.is_ascii_punctuation() && first != '`' && chars.clone().all(|c| c == first) && chars.count() >= 2
+}
+
 /// Determines whether two adjacent comment lines should be combined.
 ///
-/// Lines are combined when they share the same marker and indentation, neither is blank, the next
-/// line doesn't start with a hierarchical marker, the current line doesn't contain a code fence,
-/// and a markdown heading line (starting with `#`) is not combined with the text that follows.
+/// Lines are combined when they share the same marker and indentation, neither is blank or a divider, the next line doesn't start
+/// with a hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line (starting with `#`) is
+/// not combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
         && !current.text.is_empty()
         && !next.text.is_empty()
+        && !is_divider(&current.text)
+        && !is_divider(&next.text)
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
         && !current.text.starts_with('#')
 }
 
-/// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or
-/// ` `` ` as single tokens even if they contain spaces.
+/// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or ` `` ` as single tokens even if
+/// they contain spaces.
 fn tokenize_preserving_backticks(text: &str) -> Vec<String> {
     let mut tokens = Vec::new();
     let mut current = String::new();
@@ -238,10 +247,9 @@ fn tokenize_preserving_backticks(text: &str) -> Vec<String> {
 
 /// Wraps `text` at word boundaries so each output line fits within `max_width`.
 ///
-/// The first output line is prefixed with `prefix` (typically indent + marker + space).
-/// Continuation lines use `continuation_prefix`, which may include extra indentation to align with
-/// text after a hierarchical marker. Words that exceed the available width are emitted on their own
-/// line without truncation. Backtick-delimited spans are kept on the same line.
+/// The first output line is prefixed with `prefix` (typically indent + marker + space). Continuation lines use
+/// `continuation_prefix`, which may include extra indentation to align with text after a hierarchical marker. Words that exceed the
+/// available width are emitted on their own line without truncation. Backtick-delimited spans are kept on the same line.
 fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usize) -> Vec<String> {
     let words = tokenize_preserving_backticks(text);
     if words.is_empty() {
@@ -292,8 +300,8 @@ fn print_changes(changes: &[Change], header: Option<&str>) {
 
 /// Processes an entire file's content, combining and wrapping comments.
 ///
-/// Returns the reformatted content and a list of [`Change`] tuples describing what was modified.
-/// Lines inside code blocks (`` ``` ``) are passed through unchanged.
+/// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
+/// (`` ``` ``) are passed through unchanged.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
     let mut result: Vec<String> = Vec::new();
@@ -383,11 +391,10 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
 /// Fallback line width when no CLI argument or `rustfmt.toml` config is found.
 const DEFAULT_WIDTH: usize = 100;
 
-/// Searches for `.rustfmt.toml` or `rustfmt.toml` from the current directory up to `$HOME`,
-/// returning the `max_width` value and the config file path if found.
+/// Searches for `.rustfmt.toml` or `rustfmt.toml` from the current directory up to `$HOME`, returning the `max_width` value and the
+/// config file path if found.
 ///
-/// Stops at the first config file encountered. If that file exists but does not contain a
-/// `max_width` key, returns `None`.
+/// Stops at the first config file encountered. If that file exists but does not contain a `max_width` key, returns `None`.
 fn find_rustfmt_width() -> Option<(usize, PathBuf)> {
     let home = env::var("HOME").ok().map(PathBuf::from);
     let mut dir = env::current_dir().ok()?;
@@ -691,6 +698,46 @@ mod tests {
     }
 
     #[test]
+    fn test_is_divider() {
+        assert!(is_divider("---"));
+        assert!(is_divider("=========="));
+        assert!(is_divider("**********"));
+        assert!(is_divider("~~~~~"));
+        assert!(is_divider("//////"));
+        assert!(is_divider("- - - -"));
+        assert!(!is_divider("--"));
+        assert!(!is_divider("-=-=-="));
+        assert!(!is_divider("```"));
+        assert!(!is_divider("- item"));
+        assert!(!is_divider("text"));
+        assert!(!is_divider(""));
+    }
+
+    #[test]
+    fn test_no_combine_divider_with_previous() {
+        let input = "// some text\n// ==========\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_divider_with_next() {
+        let input = "// ----------\n// some text\n// ==========\n// more text\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_consecutive_dividers() {
+        let input = "// ----------\n// ----------\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
     fn test_wrap_text() {
         let result = wrap_text("hello world foo bar baz", "// ", "// ", 15);
         assert_eq!(result, vec!["// hello world", "// foo bar baz"]);
@@ -937,8 +984,8 @@ mod tests {
 
     #[test]
     fn test_tokenize_mixed_backtick_delimiters() {
-        // `` ` `` is a double-backtick span containing a single backtick ` `` ` is a
-        // single-backtick span containing double backticks
+        // `` ` `` is a double-backtick span containing a single backtick ` `` ` is a single-backtick span containing double
+        // backticks
         assert_eq!(
             tokenize_preserving_backticks("`` ` `` or ` `` ` end"),
             vec!["`` ` ``", "or", "` `` `", "end"]

@@ -77,6 +77,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 4. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `1.`, `A.`, `a.`
 5. The current line does not contain a code fence marker (`` ``` ``)
 6. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
+7. Neither line is a divider (three or more of the same punctuation character, e.g. `---`, `====`, `****`)
 
 ## Width Resolution
 

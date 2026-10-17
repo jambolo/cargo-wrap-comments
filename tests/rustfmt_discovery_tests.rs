@@ -1,5 +1,5 @@
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -18,7 +18,7 @@ fn temp_dir() -> PathBuf {
     dir
 }
 
-fn create_file(dir: &PathBuf, name: &str, content: &str) -> PathBuf {
+fn create_file(dir: &Path, name: &str, content: &str) -> PathBuf {
     let path = dir.join(name);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
