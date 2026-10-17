@@ -12,7 +12,7 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 - Combines consecutive comment lines before wrapping
 - Supports Rust comment styles: `//`, `///`, `//!`
 - Preserves indentation, comment markers, and blank comment lines
-- Respects hierarchical markers (`#`, `*`, `-`, `1.`, `A.`, `a.`), back-tick quoted text, and code blocks
+- Respects hierarchical markers (`#`, `*`, `-`, `+`, `1.`, `1)`, `A.`, `a)`, `ii.`), back-tick quoted text, and code blocks
 - Glob pattern support for processing multiple files
 - Stdin/stdout mode when no files are specified
 - Check mode for previewing changes without modifying files
@@ -83,7 +83,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 1. Same comment marker (`//`, `///`, or `//!`)
 2. Same indentation level
 3. Neither line is blank
-4. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `1.`, `A.`, `a.`
+4. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `1.`, `A.`, `a.`, or one of these followed by a space: `+`, `1)`, `a)`, a Roman numeral followed by `.` or `)` (e.g. `ii.`, `XII)`)
 5. The current line does not contain a code fence marker (`` ``` ``)
 6. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
 7. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
