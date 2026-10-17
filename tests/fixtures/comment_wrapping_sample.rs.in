@@ -1,0 +1,826 @@
+// Copyright (c) 2026 The cargo-wrap-comments Authors. This header imitates the license banner that many projects put at the top of every file.
+// SPDX-License-Identifier: MIT
+//
+// Permission is hereby granted, free of charge, to any person obtaining a copy of this software and associated documentation files (the "Software"), to deal in the Software without restriction, including without limitation the rights to use, copy, modify, merge, publish, distribute, sublicense, and/or sell copies of the Software.
+
+//! # Comment Wrapping Sample
+//!
+//! This file is a fixture for measuring the quality of `cargo-wrap-comments`. It is deliberately full of comments written in
+//! every style that Rust developers commonly use, and the code exists only so that those comments have something real to describe. The intent is that the output of the tool can be compared to a copy of this file that was wrapped by hand, and that every difference between the two points at either a bug or a judgment call worth discussing.
+//!
+//! This paragraph
+//! was written with
+//! very short lines,
+//! as if someone had been typing on a phone,
+//! and it should be combined into a single paragraph before it is wrapped again.
+//!
+//! This paragraph was written with lines that are a little bit too long for the configured width, which means that every one of them
+//! spills over by a word or two, and a naive wrapper that looks at only one line at a time will produce a ragged result with lots
+//! of orphaned words at the start of every other line, which is exactly the failure mode that this paragraph is meant to catch.
+//!
+//! This paragraph is wrapped at eighty columns, which is narrower than the
+//! configured width. Whether the tool should widen it is a matter of taste, but
+//! the result should be the same as if the paragraph had been written on a
+//! single line.
+//!
+//! A one-line paragraph that fits.
+//!
+//! ## What the code does
+//!
+//! The code implements a small, fixed-capacity [`RingBuffer`], a [`Priority`] enum, a [`Config`] struct, the [`Drain`] trait, the [`ring!`] macro, and a Fletcher-16 [`checksum`](checksum::fletcher16). None of it is clever, and all of it is tested at the bottom of the file.
+//!
+//! ## Comment styles covered
+//!
+//! - Inner line doc comments (`//!`), like this one.
+//! - Outer line doc comments (`///`) on functions, structs, fields, enums, variants, traits, associated items, constants, statics, type aliases, modules, and macros.
+//! - Ordinary line comments (`//`), including banners, `TODO`, `FIXME`, `NOTE`, and `SAFETY` comments, trailing comments after code, and commented-out code.
+//! - Block comments (`/* ... */`), outer block doc comments (`/** ... */`), and inner block doc comments (`/*! ... */`).
+//! - The `#[doc = "..."]` attribute, which is not a comment at all and must be left alone.
+//!
+//! ### Markdown constructs covered
+//!
+//! * Bullets written with `*` instead of `-`, because both are common and both are valid CommonMark.
+//! * Nested lists:
+//!   - The second level, written with `-` and indented by two spaces so that it lines up with the text of its parent item.
+//!     - The third level, which is indented four spaces relative to the first level and therefore needs its continuation lines indented even further when it is wrapped.
+//!   - Back to the second level.
+//! * Ordered lists numbered `1.`, lettered lists numbered `A.` and `a.`, and ordered lists that start at `9.` so that they cross
+//!   into two digits.
+//! * Code fences with and without a language tag, with attributes such as `ignore` and `no_run`, and with tildes instead of backticks.
+//! * Tables, block quotes, link reference definitions, footnotes[^width], inline HTML, headings, and thematic breaks.
+//!
+//! ---
+//!
+//! The line above is a thematic break and must not be combined with this sentence or with the blank line that precedes it.
+//!
+//! [^width]: The configured width for this repository is 132 columns, which comes from the `.rustfmt.toml` file at the root of the repository, but the sample is also meant to be wrapped at the default of 100 columns.
+/* Known limitation (the tool does not format Markdown): the footnote's continuation line is not indented after wrapping. */
+
+use std::fmt;
+
+// ==================================================================================================================================
+// Constants, statics, and type aliases
+// ==================================================================================================================================
+
+/// The capacity used by [`Config::default`].
+///
+/// Sixteen is small enough to keep the examples readable and large enough that the wrap-around logic in [`RingBuffer::push`] is exercised by the tests.
+pub const DEFAULT_CAPACITY: usize = 16;
+
+/// The largest capacity that [`RingBuffer::with_capacity`] accepts.
+/// Anything larger is rejected with [`Error::InvalidCapacity`] rather than
+/// risking an allocation failure.
+/* Known limitation (trailing comments are not wrapped): the trailing comment below stays past the configured width. */
+pub const MAX_CAPACITY: usize = 1 << 20; // about a million slots; this trailing comment is long enough that it runs well past the configured maximum width
+
+/// A greeting used by the tests.
+///
+/// It contains `//` and `/*` on purpose: neither of them starts a comment inside a string literal, and neither should confuse a tool that is looking for comments.
+pub static GREETING: &str = "hello // not a comment /* also not a comment */";
+
+/// Shorthand for `std::result::Result<T, Error>`, following the convention used by [`std::io::Result`] and countless other crates.
+pub type Result<T> = std::result::Result<T, Error>;
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Errors
+// ----------------------------------------------------------------------------------------------------------------------------------
+
+/// Errors returned by [`RingBuffer`] operations.
+///
+/// Every variant carries enough information to produce a useful message from its [`Display`](fmt::Display) implementation without
+/// needing any extra context from the caller.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Error {
+    /// The buffer is full and overwriting was not requested.
+    Full {
+        /// The capacity of the buffer at the time of the failed push. This is always equal to the value returned by [`RingBuffer::capacity`], because the capacity of a ring buffer never changes after the buffer has been created.
+        capacity: usize,
+    },
+
+    /// The buffer is empty.
+    Empty,
+
+    /// The requested capacity was zero or greater than [`MAX_CAPACITY`].
+    ///
+    /// A capacity of zero is rejected because a zero-sized ring buffer
+    /// can never hold anything, and every operation on it would be a
+    /// no-op that is almost certainly a bug in the caller.
+    InvalidCapacity(usize),
+}
+
+impl fmt::Display for Error {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            // The capacity is included because "buffer is full" on its own is surprisingly unhelpful when several buffers of different sizes are in play.
+            Self::Full { capacity } => write!(f, "ring buffer is full (capacity {capacity})"),
+            Self::Empty => f.write_str("ring buffer is empty"), // short trailing comment
+            Self::InvalidCapacity(capacity) => {
+                // Two
+                // very
+                // short
+                // lines.
+                write!(f, "invalid capacity {capacity}; expected 1..={MAX_CAPACITY}")
+            }
+        }
+    }
+}
+
+impl std::error::Error for Error {}
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Priority
+// ----------------------------------------------------------------------------------------------------------------------------------
+
+/**
+ * The urgency of an item stored in a [`RingBuffer`].
+ *
+ * This doc comment uses the block style with a leading asterisk on every line, which is common among developers coming from Java, C#, or C++ with Doxygen. Rustdoc strips the leading asterisks, so the rendered output is identical to that of the equivalent `///` comment.
+ */
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Priority {
+    /// Can wait indefinitely.
+    Low,
+    /// The default. Most items are neither urgent nor ignorable, and most code that creates items never thinks about priority at all.
+    #[default]
+    Normal,
+    /// Should be handled before [`Normal`](Priority::Normal) items.
+    High,
+    /** Must be handled immediately; this is a one-line block doc comment on a variant. */
+    Critical,
+}
+
+impl Priority {
+    /// Returns `true` for [`High`](Self::High) and [`Critical`](Self::Critical).
+    #[must_use]
+    pub fn is_urgent(self) -> bool {
+        matches!(self, Self::High | Self::Critical) /* inline block comment after an expression */
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// RingBuffer
+// ----------------------------------------------------------------------------------------------------------------------------------
+
+/// A fixed-capacity, first-in, first-out queue backed by a single allocation.
+///
+/// Values are pushed onto the back and popped from the front. When the buffer is full, [`push`](Self::push) fails and [`force_push`](Self::force_push) evicts the oldest value.
+///
+/// # Examples
+///
+/// Basic usage:
+///
+/// ```
+/// # use ring_buffer::{Error, RingBuffer};
+/// let mut buffer = RingBuffer::with_capacity(2)?;
+/// buffer.push('a')?;
+/// buffer.push('b')?;
+/// assert_eq!(buffer.push('c'), Err(Error::Full { capacity: 2 }));
+/// assert_eq!(buffer.pop(), Some('a'));
+/// # Ok::<(), Error>(())
+/// ```
+///
+/// Evicting the oldest value:
+///
+/// ```rust
+/// # use ring_buffer::RingBuffer;
+/// let mut buffer = RingBuffer::with_capacity(2).unwrap();
+/// assert_eq!(buffer.force_push(1), None);
+/// assert_eq!(buffer.force_push(2), None);
+/// assert_eq!(buffer.force_push(3), Some(1)); // the buffer was full, so the oldest value, which was `1`, was evicted and returned to the caller
+/// ```
+///
+/// # Layout
+///
+/// ```text
+///            head                    tail
+///             |                       |
+///             v                       v
+/// +-------+-------+-------+-------+-------+-------+
+/// | None  |   a   |   b   |   c   | None  | None  |
+/// +-------+-------+-------+-------+-------+-------+
+/// ```
+///
+/// The diagram above is inside a `text` code block, so its long lines and its lines that begin with `+` and `|` must be left exactly as they are.
+#[derive(Debug, Clone)]
+pub struct RingBuffer<T> {
+    // Each slot is `None` when it is vacant. Using `Option<T>` costs a discriminant per slot for most `T`, but it lets the
+    // implementation stay in safe code everywhere except `get_unchecked`.
+    slots: Vec<Option<T>>,
+    /* Known limitation (trailing comments are not wrapped): the trailing comment on `len` stays past the configured width. */
+    head: usize, // index of the oldest value, which is the next one to be popped
+    len: usize, // number of occupied slots; always less than or equal to `slots.len()`, and equal to it exactly when the buffer is full
+}
+
+/// Construction and inspection.
+impl<T> RingBuffer<T> {
+    /// Creates an empty buffer that can hold exactly `capacity` values.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidCapacity`] if `capacity` is `0` or greater than [`MAX_CAPACITY`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// # use ring_buffer::{Error, RingBuffer};
+    /// let buffer = RingBuffer::<u8>::with_capacity(4)?;
+    /// assert_eq!(buffer.capacity(), 4);
+    /// assert!(buffer.is_empty());
+    ///
+    /// // A capacity of zero is rejected, and so is anything larger than `MAX_CAPACITY`. This comment is inside a code block, so it must not be wrapped.
+    /// assert_eq!(RingBuffer::<u8>::with_capacity(0).unwrap_err(), Error::InvalidCapacity(0));
+    /// # Ok::<(), Error>(())
+    /// ```
+    pub fn with_capacity(capacity: usize) -> Result<Self> {
+        if capacity == 0 || capacity > MAX_CAPACITY {
+            return Err(Error::InvalidCapacity(capacity));
+        }
+        // `vec![None; capacity]` would require `T: Clone`, so
+        // the slots are filled one at a time instead.
+        let mut slots = Vec::with_capacity(capacity);
+        slots.resize_with(capacity, || None);
+        Ok(Self { slots, head: 0, len: 0 })
+    }
+
+    /// Returns the maximum number of values the buffer can hold.
+    #[must_use]
+    pub fn capacity(&self) -> usize {
+        self.slots.len()
+    }
+
+    #[must_use]
+    /// Returns the number of values currently in the buffer. This doc comment comes after an attribute instead of before it, which is legal and occasionally seen in the wild.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    /// Returns `true` if the buffer holds no values.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// Returns `true` if the buffer holds [`capacity`](Self::capacity) values.
+    /// # Performance
+    /// This is a single comparison. The heading above is immediately followed by text, with no blank line in between, and the
+    /// heading must not be combined with it.
+    #[must_use]
+    pub fn is_full(&self) -> bool {
+        self.len == self.slots.len()
+    }
+
+    /// Converts a logical offset from the head into a physical index into `slots`.
+    fn physical(&self, offset: usize) -> usize {
+        (self.head + offset) % self.slots.len()
+    }
+}
+
+/// Insertion and removal.
+impl<T> RingBuffer<T> {
+    /// Appends `value` to the back of the buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Full`] if the buffer is full. The value is dropped in that case; use [`force_push`](Self::force_push) instead if
+    /// the oldest value should be evicted to make room.
+    pub fn push(&mut self, value: T) -> Result<()> {
+        if self.is_full() {
+            return Err(Error::Full {
+                capacity: self.capacity(),
+            });
+        }
+        let tail = self.physical(self.len);
+        self.slots[tail] = Some(value);
+        self.len += 1;
+        Ok(())
+    }
+
+    /// Appends `value`, evicting and returning the oldest value if the buffer is already full.
+    ///
+    /// Unlike [`push`](Self::push), this never fails. The steps are:
+    ///
+    /// 1. If the buffer is not full, behave exactly like `push` and return `None`.
+    /// 2. Otherwise, take the value at the head, which is the oldest value in the buffer.
+    /// 3. Store `value` in the slot that was just vacated, which is also the slot immediately after the newest value, because the buffer is full and therefore wraps around exactly there.
+    /// 4. Advance the head by one slot, wrapping around to `0` when it
+    ///    reaches the end.
+    /// 5. Return the evicted value.
+    pub fn force_push(&mut self, value: T) -> Option<T> {
+        if !self.is_full() {
+            let tail = self.physical(self.len);
+            self.slots[tail] = Some(value);
+            self.len += 1;
+            return None;
+        }
+
+        /* Known limitation (only markers are considered when joining): the `- not even` line below is taken for a bullet. */
+        // The head index is never reset to zero
+        // - not even when the buffer becomes empty - because nothing depends on where the head is, only on where it is relative to
+        // the tail. A human would read the line above as a continuation, but it starts with a hyphen.
+        let evicted = self.slots[self.head].replace(value);
+        self.head = self.physical(1);
+        evicted
+    }
+
+    /// Removes and returns the oldest value, or `None` if the buffer is empty.
+    pub fn pop(&mut self) -> Option<T> {
+        if self.is_empty() {
+            return None;
+        }
+        let value = self.slots[self.head].take();
+        self.head = self.physical(1);
+        self.len -= 1;
+        value
+    }
+
+    /// Like [`pop`](Self::pop), but returns [`Error::Empty`] instead of `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Empty`] if the buffer is empty.
+    pub fn try_pop(&mut self) -> Result<T> {
+        self.pop().ok_or(Error::Empty)
+    }
+}
+
+/// Access without removal.
+impl<T> RingBuffer<T> {
+    /// Returns a reference to the oldest value without removing it.
+    #[must_use]
+    pub fn peek(&self) -> Option<&T> {
+        self.get(0)
+    }
+
+    /// Returns a reference to the value `index` positions after the oldest value, or `None` if `index` is out of bounds.
+    ///
+    /// Index `0` is the oldest value and index [`len`](Self::len)` - 1` is the newest. Note the code span that is glued to the end of a link in the previous sentence; the two must stay together.
+    #[must_use]
+    pub fn get(&self, index: usize) -> Option<&T> {
+        if index < self.len {
+            self.slots[self.physical(index)].as_ref()
+        } else {
+            None
+        }
+    }
+
+    /// Returns a reference to the value `index` positions after the oldest value, without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be less than [`len`](Self::len). Calling this method with an out-of-bounds index is *[undefined behavior]* even if the resulting reference is never used.
+    ///
+    /// [undefined behavior]: https://doc.rust-lang.org/reference/behavior-considered-undefined.html#a-very-long-fragment-identifier-that-cannot-be-split
+    /* Known limitation (the tool does not format Markdown): the link reference definition above is split before its URL. */
+    #[must_use]
+    pub unsafe fn get_unchecked(&self, index: usize) -> &T {
+        debug_assert!(index < self.len, "index out of bounds");
+        // SAFETY: The caller guarantees that `index < self.len`. `physical` always returns a value less than `slots.len()`, so the slot exists, and every slot within `len` of the head is occupied, so `unwrap_unchecked` is sound.
+        unsafe { self.slots.get_unchecked(self.physical(index)).as_ref().unwrap_unchecked() }
+    }
+
+    /// Returns an iterator over the values from oldest to newest.
+    pub fn iter(&self) -> Iter<'_, T> {
+        Iter { buffer: self, index: 0 }
+    }
+}
+
+/// An iterator over the values in a [`RingBuffer`], created by [`RingBuffer::iter`].
+///
+/// > **Note:** The iterator borrows the buffer, so the buffer cannot be modified while the iterator is alive. This is enforced by the borrow checker,
+/// > and the quoted text is split across two lines that both begin with `>`.
+#[derive(Debug, Clone)]
+pub struct Iter<'a, T> {
+    buffer: &'a RingBuffer<T>,
+    index: usize,
+}
+
+impl<'a, T> Iterator for Iter<'a, T> {
+    type Item = &'a T;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        let item = self.buffer.get(self.index)?;
+        self.index += 1;
+        Some(item)
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let remaining = self.buffer.len() - self.index;
+        (remaining, Some(remaining))
+    }
+}
+
+impl<T> ExactSizeIterator for Iter<'_, T> {}
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Drain
+// ----------------------------------------------------------------------------------------------------------------------------------
+
+/// Types that can be emptied in a single call.
+///
+/// | Implementor       | Order            | Notes                                                                                                         |
+/// | ----------------- | ---------------- | ------------------------------------------------------------------------------------------------------------- |
+/// | [`RingBuffer<T>`] | oldest to newest | The only implementor in this file. The table row is longer than the configured width and must not be wrapped. |
+pub trait Drain {
+    /// The type of the values that are removed.
+    type Item;
+
+    /// Removes every value and returns them in the order in which they would have been returned by repeated calls to a `pop` method.
+    ///
+    /// ~~~
+    /// # use ring_buffer::{Drain, RingBuffer};
+    /// let mut buffer = RingBuffer::with_capacity(3).unwrap();
+    /// buffer.push("x").unwrap();
+    /// buffer.push("y").unwrap();
+    /// assert_eq!(buffer.drain_all(), ["x", "y"]); // tilde fences are valid CommonMark, and everything between them is code, including this long trailing comment
+    /// assert!(buffer.is_empty());
+    /// ~~~
+    fn drain_all(&mut self) -> Vec<Self::Item>;
+}
+
+impl<T> Drain for RingBuffer<T> {
+    type Item = T;
+
+    fn drain_all(&mut self) -> Vec<T> {
+        std::iter::from_fn(|| self.pop()).collect()
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Config
+// ----------------------------------------------------------------------------------------------------------------------------------
+
+#[doc = "Settings for constructing a [`RingBuffer`] with [`Config::build`]. This sentence is in a `#[doc]` attribute, not a comment, so it must be left alone even though it is long."]
+#[doc = ""]
+#[doc = "Multiple `#[doc]` attributes are concatenated with newlines, exactly like consecutive `///` lines."]
+#[doc(alias = "ringbuf_config")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Config {
+    /// How many values the buffer can hold. Must be in `1..=MAX_CAPACITY`.
+    pub capacity: usize,
+    /// Whether [`Config::insert`] should evict the oldest value when the buffer is full (`true`), or fail with [`Error::Full`] (`false`).
+    pub overwrite: bool,
+    /// A human-readable name used only in diagnostics.
+    ///
+    /// It may be empty. It may contain non-ASCII text such as "naïve café résumé — 日本語のテキスト", which takes more bytes than columns, so a tool that measures width in bytes will wrap this line earlier than one that measures it in characters.
+    pub name: String,
+    /// The priority assigned to every value inserted through this configuration.
+    pub priority: Priority,
+}
+
+impl Default for Config {
+    /// Returns a configuration with [`DEFAULT_CAPACITY`], no overwriting, an empty name, and [`Priority::Normal`].
+    fn default() -> Self {
+        Self {
+            capacity: DEFAULT_CAPACITY,
+            overwrite: false,
+            name: String::new(),
+            priority: Priority::default(),
+        }
+    }
+}
+
+impl Config {
+    /// Creates an empty buffer with the configured capacity.
+    ///
+    /// # Errors
+    ///
+    /// See [`RingBuffer::with_capacity`].
+    pub fn build<T>(&self) -> Result<RingBuffer<T>> {
+        RingBuffer::with_capacity(self.capacity)
+    }
+
+    /// Inserts `value` into `buffer` according to the configured [eviction policy](Config::overwrite).
+    ///
+    /// The eviction policies, in order of preference, are:
+    ///
+    /// A. Evict the oldest value. This is what [`RingBuffer::force_push`] does, and it is the cheapest option because the head simply advances by one slot.
+    /// B. Reject the new value. This is what [`RingBuffer::push`] does.
+    /// C. Grow the buffer. This is deliberately not supported, because a ring buffer that grows is just a [`VecDeque`](std::collections::VecDeque)
+    ///    with extra steps.
+    ///    a. If growth were supported, it would double the capacity.
+    ///    b. It would also need to rotate the contents so that the head is at index zero, which costs a pass over every value in the buffer.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::Full`] if the buffer is full and [`overwrite`](Config::overwrite) is `false`.
+    pub fn insert<T>(&self, buffer: &mut RingBuffer<T>, value: T) -> Result<Option<T>> {
+        if self.overwrite {
+            Ok(buffer.force_push(value))
+        } else {
+            buffer.push(value).map(|()| None)
+        }
+    }
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Macros
+// ----------------------------------------------------------------------------------------------------------------------------------
+
+/// Creates a [`RingBuffer`] containing the given values.
+///
+/// - `ring![]` creates an empty buffer with [`DEFAULT_CAPACITY`].
+/// - `ring![a, b, c]` creates a buffer whose capacity is exactly the number of values given, and pushes them in order, so that the first value given is the first value popped.
+/// - `ring![value; n]` creates a full buffer with capacity `n` in which every slot holds a clone of `value`.
+///   - The value is evaluated once.
+///   - It is cloned `n` times, even though `n - 1` clones would be enough, because the extra clone keeps the macro simple and the cost is negligible for the small `Copy` types it is normally used with.
+///
+/// # Panics
+///
+/// Panics if `n` is zero or greater than [`MAX_CAPACITY`] in the third form.
+#[macro_export]
+macro_rules! ring {
+    // Empty.
+    () => {
+        $crate::sample::RingBuffer::with_capacity($crate::sample::DEFAULT_CAPACITY).expect("the default capacity is valid")
+    };
+
+    // Repeated value. This arm must come before the list arm, because otherwise `ring![x; 3]` would fail to parse as a list and the error message would be confusing to the person who wrote it.
+    ($value:expr; $n:expr) => {{
+        let value = $value;
+        let mut buffer = $crate::sample::RingBuffer::with_capacity($n).expect("invalid capacity");
+        for _ in 0..buffer.capacity() {
+            buffer.force_push(::std::clone::Clone::clone(&value));
+        }
+        buffer
+    }};
+
+    // List of values, with an optional trailing comma.
+    ($($value:expr),+ $(,)?) => {{
+        let values = [$($value),+];
+        let mut buffer = $crate::sample::RingBuffer::with_capacity(values.len()).expect("at least one value");
+        for value in values {
+            buffer.force_push(value);
+        }
+        buffer
+    }};
+}
+
+// ----------------------------------------------------------------------------------------------------------------------------------
+// Checksums
+// ----------------------------------------------------------------------------------------------------------------------------------
+
+// The module's documentation is inside it, as an inner block doc comment, because clippy rejects a module that has both outer and inner doc comments.
+pub mod checksum {
+    /*!
+    Checksums for verifying the contents of a buffer.
+
+    This inner block doc comment has no leading asterisks, which is the other common way to write a block comment, and it is indented to match the surrounding code.
+
+    Block comments are not line comments, so a tool that handles only `//`, `///`, and `//!` should leave this text exactly as it is, no matter how long its lines are.
+    */
+
+    /// Computes the [Fletcher-16] checksum of `bytes`.
+    ///
+    /// The checksum consists of two 8-bit running sums, each taken modulo 255:
+    ///
+    /// ```text
+    /// sum1 = (sum1 + byte) % 255
+    /// sum2 = (sum2 + sum1) % 255
+    /// ```
+    ///
+    /// The result is `(sum2 << 8) | sum1`.
+    ///
+    ///     This line is an indented code block, because it is indented by four spaces and preceded by a blank line. It must not be wrapped or combined.
+    ///
+    /// [Fletcher-16]: https://en.wikipedia.org/wiki/Fletcher%27s_checksum#Fletcher-16
+    #[must_use]
+    pub fn fletcher16(bytes: &[u8]) -> u16 {
+        let (mut sum1, mut sum2) = (0u16, 0u16);
+        for &byte in bytes {
+            // Neither sum can overflow a `u16`: each is at most 254 before the addition, and 254 + 255 = 509.
+            sum1 = (sum1 + u16::from(byte)) % 255;
+            sum2 = (sum2 + sum1) % 255;
+        }
+        (sum2 << 8) | sum1
+    }
+}
+
+/// Expected Fletcher-16 checksums for a few well-known inputs.
+///
+/// | Input      | Checksum | Notes                                                                                                          |
+/// | ---------- | -------- | -------------------------------------------------------------------------------------------------------------- |
+/// | `""`       | `0x0000` | Both running sums start at zero and nothing is ever added to them.                                             |
+/// | `"abcde"`  | `0xC8F0` | From the Wikipedia article.                                                                                    |
+/// | `"abcdef"` | `0x2057` | Ditto.                                                                                                         |
+#[rustfmt::skip]
+const KNOWN_CHECKSUMS: [(&[u8], u16); 3] = [
+    (b"",       0x0000), // empty
+    (b"abcde",  0xC8F0), // five bytes
+    /* Known limitation (trailing comments are not wrapped): the trailing comment below stays past the configured width. */
+    (b"abcdef", 0x2057), // six bytes; this trailing comment is aligned with the ones above and is long enough to exceed the width
+];
+
+// ==================================================================================================================================
+// Tests
+// ==================================================================================================================================
+
+/*
+ * Known limitation (only markers are considered when joining; the tool cannot discern context): the lines below are independent
+ * examples, but unmarked lines are joined into paragraphs. The inline-fence line is joined into the `- [x]` task list item.
+ */
+// Comment-style odds and ends that do not belong to any particular item:
+//
+//no space after the marker, which rustfmt leaves alone and which is common in code that was commented out in a hurry.
+//    Four spaces after the marker, which in a doc comment would be an indented code block but here is just indented prose.
+// A line that ends with a backslash, which in Markdown is a hard line break\
+// so combining it with this line changes the rendered output.
+// End of sentence.  Two spaces after the period, an old typewriter habit that a tool may or may not preserve when combining lines.
+// See issue #42 for details; the `#` here is in the middle of the line, not at the start.
+// #42 is the same issue, but this time the line starts with `#`, so it looks like a heading even though it is not one.
+// *Emphasis* at the start of a line looks like a bullet to a tool that checks only the first character.
+// **Bold** at the start of a line has the same problem.
+// 2026. That was the year this sample was written, and the line looks like an ordered list item.
+// e.g. a line starting with an abbreviation, which looks like a lettered list item to a naive check.
+// I. Roman numerals are sometimes used for lists, and `I.` happens to look like a single-letter marker.
+// ii. But `ii.` does not, so it should be combined with the previous line, which is probably not what the author intended.
+// + Plus signs are valid CommonMark bullets too.
+// + And this is the second plus-sign bullet, which a tool that does not recognize `+` will combine with the first.
+// 1) Parenthesized ordered list markers are also valid CommonMark.
+// 2) Second item.
+// - [ ] An unchecked task list item.
+// - [x] A checked task list item that is long enough that it needs to be wrapped, and its continuation line should be indented to match the text after the hyphen.
+// A line containing an inline fence like ``` in the middle of the sentence.
+// The line after an inline fence.
+// https://example.com/a/very/long/url/that/is/much/longer/than/the/configured/width/and/therefore/cannot/be/split/anywhere/without/breaking/it
+// 0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789
+// A long code span: `RingBuffer::<Vec<Option<std::collections::HashMap<String, Priority>>>>::with_capacity(DEFAULT_CAPACITY).unwrap()` is never split.
+// A double-backtick span: `` a span that contains a single ` backtick and some spaces `` is also a single token and must stay on one line.
+// ~~~
+// Tilde fence in a plain comment, followed by a very long line that a tool which recognizes only backtick fences will combine and wrap.
+// ~~~
+// ***
+// ===
+// _ _ _
+//
+// The line above is blank, and the three lines above it are dividers. This line ends the block, at exactly the right length to fit.
+//
+// This line is exactly one character too long for the configured width of 132 columns, so it must be wrapped into two separate lines.
+
+// TODO(someone): Add a `resize` method. This is a long TODO comment that explains the motivation in detail, because TODO comments without motivation tend to rot.
+// FIXME: Short FIXME.
+// NOTE: The tests below use `assert_eq!` rather than `assert!` wherever possible, because `assert_eq!` prints both values when it fails.
+// HACK: None.
+// XXX: None either.
+
+/* A plain block comment on one line. */
+
+/*
+ * A plain multi-line block comment with leading asterisks. Block comments are not processed by the tool, so this line should remain longer than the configured width.
+ * /* Rust allows block comments to nest, unlike C, so this inner comment does not end the outer one. */
+ */
+
+#[test]
+fn push_and_pop() {
+    let mut buffer = RingBuffer::with_capacity(3).unwrap();
+    assert!(buffer.is_empty());
+
+    // Fill the buffer completely and check that the next push fails.
+    for value in 1..=3 {
+        buffer.push(value).unwrap();
+    }
+    assert!(buffer.is_full());
+    assert_eq!(buffer.len(), 3);
+    assert_eq!(buffer.push(4), Err(Error::Full { capacity: 3 }));
+
+    // Pop everything and check the order.
+    assert_eq!(buffer.pop(), Some(1));
+    assert_eq!(buffer.pop(), Some(2));
+    assert_eq!(buffer.pop(), Some(3));
+    assert_eq!(buffer.pop(), None);
+    assert_eq!(buffer.try_pop(), Err(Error::Empty));
+}
+
+#[test]
+fn force_push_evicts_the_oldest_value() {
+    let mut buffer = RingBuffer::with_capacity(2).unwrap();
+    assert_eq!(buffer.force_push('a'), None);
+    assert_eq!(buffer.force_push('b'), None);
+    assert_eq!(buffer.force_push('c'), Some('a')); // 'a' was the oldest
+    assert_eq!(buffer.iter().copied().collect::<Vec<_>>(), ['b', 'c']);
+    assert_eq!(buffer.iter().len(), 2);
+}
+
+#[test]
+fn indexing() {
+    let mut buffer = RingBuffer::with_capacity(4).unwrap();
+    for value in 10..16 {
+        buffer.force_push(value);
+    }
+    assert_eq!(buffer.peek(), Some(&12));
+    assert_eq!(buffer.get(3), Some(&15));
+    assert_eq!(buffer.get(4), None);
+
+    // SAFETY: `1 < buffer.len()`.
+    let second = unsafe { buffer.get_unchecked(1) };
+    assert_eq!(*second, 13);
+}
+
+#[test]
+fn errors_display_helpful_messages() {
+    let cases = [
+        (Error::Full { capacity: 8 }, "ring buffer is full (capacity 8)"),
+        (Error::Empty, "ring buffer is empty"),
+        // The expected message embeds `MAX_CAPACITY`, so it is built with `format!` instead of being written out as a literal that would go stale if the constant ever changed.
+        (
+            Error::InvalidCapacity(0),
+            &*format!("invalid capacity 0; expected 1..={MAX_CAPACITY}"),
+        ),
+    ];
+    for (error, expected) in cases {
+        assert_eq!(error.to_string(), expected);
+    }
+    assert!(RingBuffer::<()>::with_capacity(MAX_CAPACITY + 1).is_err());
+}
+
+#[test]
+fn priorities() {
+    let all = [Priority::Low, Priority::Normal, Priority::High, Priority::Critical];
+    let urgent: Vec<_> = all.into_iter().filter(|p| p.is_urgent()).collect();
+    assert_eq!(urgent, [Priority::High, Priority::Critical]);
+    assert!(Priority::Low < Priority::Critical); // variants are ordered by declaration
+}
+
+#[test]
+fn config_policies() {
+    let strict = Config {
+        capacity: 1,
+        name: "strict".to_owned(),
+        ..Config::default()
+    };
+    let lossy = Config {
+        overwrite: true,
+        priority: Priority::Low,
+        ..strict.clone()
+    };
+    assert_eq!(strict.priority, Priority::Normal);
+    assert_eq!(lossy.name, "strict");
+
+    let mut buffer = strict.build().unwrap();
+    assert_eq!(strict.insert(&mut buffer, 1), Ok(None));
+    assert_eq!(strict.insert(&mut buffer, 2), Err(Error::Full { capacity: 1 }));
+    assert_eq!(lossy.insert(&mut buffer, 3), Ok(Some(1)));
+
+    /* Known limitation (the tool cannot distinguish code from prose): the commented-out code below is joined with the prose. */
+    // let mut big = Config { capacity: MAX_CAPACITY, ..Config::default() }.build::<u64>().unwrap();
+    // big.force_push(0);
+    // assert_eq!(big.len(), 1);
+    // The three lines above are commented-out code. Combining them into a paragraph would be wrong, but nothing distinguishes them from prose except that they look like code.
+}
+
+#[test]
+fn macro_forms() {
+    let empty: RingBuffer<u8> = ring![];
+    assert_eq!(empty.capacity(), DEFAULT_CAPACITY);
+
+    let mut listed = ring![1, 2, 3,];
+    assert_eq!(listed.drain_all(), [1, 2, 3]);
+
+    let repeated = ring![7_u8; 3];
+    assert!(repeated.is_full());
+    assert!(repeated.iter().all(|&v| v == 7));
+}
+
+#[test]
+fn checksums() {
+    for (input, expected) in KNOWN_CHECKSUMS {
+        assert_eq!(checksum::fletcher16(input), expected, "input {input:?}");
+    }
+}
+
+#[test]
+fn comment_markers_inside_strings_are_not_comments() {
+    assert!(GREETING.contains("//"));
+
+    /* Known limitation (the tool does not parse Rust syntax): the `///` lines inside the raw string below are wrapped. */
+    // The lines inside this raw string look exactly like doc comments, but they are part of a string literal. A tool that rewrites them changes the program's behavior.
+    let source = r"
+/// This line is inside a raw string literal and is much longer than the configured maximum width, so a tool that does not track string literals will wrap it.
+/// So will this one, which is short.
+";
+    assert_eq!(source.lines().filter(|line| line.starts_with("///")).count(), 2);
+}
+
+#[test]
+fn deeply_nested_comments() {
+    let mut buffer = RingBuffer::with_capacity(8).unwrap();
+    for round in 0..5 {
+        match round % 2 {
+            0 => {
+                let push_all = |buffer: &mut RingBuffer<i32>| {
+                    for value in 0..round {
+                        if value % 2 == 0 {
+                            // This comment is indented by twenty-eight spaces, which leaves much less room for text than a comment at the start of a line, so it wraps sooner.
+                            buffer.force_push(value);
+                        }
+                    }
+                };
+                push_all(&mut buffer);
+            }
+            // A comment between match arms, at the same indentation as the arm patterns.
+            _ => {
+                buffer.pop();
+            }
+        }
+    }
+    assert_eq!(buffer.iter().copied().collect::<Vec<_>>(), [0, 2]);
+}

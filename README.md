@@ -17,6 +17,14 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 - Stdin/stdout mode when no files are specified
 - Check mode for previewing changes without modifying files
 
+## Limitations
+
+- The tool is not intended to format markdown text in comments, although it does its best to respect markdown formatting.
+- Only markers or certain formatting are considered when joining adjacent lines. The tool cannot discern context or distinguish between code and prose. Separating two lines with a blank line or terminating the first with a backslash, '\\', will always prevent them from being joined.
+- The tool does not parse rust syntax, so text inside string literals that looks like a comment may be interpreted as a comment.
+- Trailing comments are not wrapped.
+- Lines with long text that cannot be split may not wrap as you might expect.
+
 ## Installation
 
 ```sh
@@ -98,8 +106,6 @@ The config file is located the same way rustfmt locates it:
 - For stdin, the search starts in the current directory.
 
 The search stops at the first config file found. If it has no `max_width`, the default is used. A config file that is not valid TOML, or whose `max_width` is not a non-negative integer, is an error, even when `--max-width` is given. All config files are checked before any file is modified.
-
-The search stops at the first config file found. If it exists but has no `max_width`, the default is used.
 
 ## Exit Codes
 
