@@ -8,7 +8,7 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 ## Features
 
 - Wraps long comments to a configurable width (default: 100 characters)
-- Reads `max_width` from `.rustfmt.toml` or `rustfmt.toml` if `--max-width` is not specified
+- Reads `max_width` from the rustfmt config file, located exactly as rustfmt locates it, if `--max-width` is not specified
 - Combines consecutive comment lines before wrapping
 - Supports Rust comment styles: `//`, `///`, `//!`
 - Preserves indentation, comment markers, and blank comment lines
@@ -61,6 +61,7 @@ cargo wrap-comments < src/main.rs
 | Option                 | Description                      | Default |
 |------------------------|----------------------------------|---------|
 | `-w`, `--max-width N`  | Maximum line width               | 100     |
+| `--config-path PATH`   | rustfmt config file or directory |         |
 | `--check`              | Preview mode, don't modify files |         |
 | `-v`, `--verbose`      | Print verbose output             |         |
 | `-q`, `--quiet`        | Print less output                |         |
@@ -84,8 +85,19 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 The line width is resolved in this order:
 
 1. `--max-width N` on the command line
-2. `max_width` from `.rustfmt.toml` or `rustfmt.toml`, searching from the current directory up to `$HOME`
+2. `max_width` from the rustfmt config file
 3. Default: 100
+
+The config file is located the same way rustfmt locates it:
+
+- With `--config-path PATH`: if `PATH` is a file, that file is used. If it is a directory, the `.rustfmt.toml` or `rustfmt.toml` directly inside it is used; its parent directories are not searched. Otherwise it is an error.
+- Otherwise, for each file, the first `.rustfmt.toml` or `rustfmt.toml` found in this order (`.rustfmt.toml` first within each directory):
+  1. The file's directory, then each parent directory up to the filesystem root
+  2. The home directory
+  3. `rustfmt` in the user config directory (`$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows)
+- For stdin, the search starts in the current directory.
+
+The search stops at the first config file found. If it has no `max_width`, the default is used. A config file that is not valid TOML, or whose `max_width` is not a non-negative integer, is an error, even when `--max-width` is given. All config files are checked before any file is modified.
 
 The search stops at the first config file found. If it exists but has no `max_width`, the default is used.
 

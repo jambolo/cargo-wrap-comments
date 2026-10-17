@@ -32,14 +32,15 @@ fn verbose_shows_width_from_cli_arg() {
 
 #[test]
 fn verbose_shows_default_width() {
-    let dir = std::env::temp_dir().join("cargo-wrap-comments-verbose-tests");
+    let dir = std::env::temp_dir().join("cargo-wrap-comments-verbose-tests-default");
     fs::create_dir_all(&dir).unwrap();
-    let path = create_temp_file("v_width_default.rs", SHORT);
+    let path = dir.join("v_width_default.rs");
+    fs::write(&path, SHORT).unwrap();
+    // A config without `max_width` ends the search, so configs elsewhere on the machine can't affect the result.
+    fs::write(dir.join(".rustfmt.toml"), "").unwrap();
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v"])
         .arg(&path)
-        .current_dir(&dir)
-        .env("HOME", &dir)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);

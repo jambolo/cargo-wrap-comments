@@ -27,16 +27,21 @@
 //! The line width is resolved in order:
 //!
 //! 1. `--max-width` CLI argument
-//! 2. `max_width` from `.rustfmt.toml` or `rustfmt.toml` (searched from the current directory up to `$HOME`)
+//! 2. `max_width` from the rustfmt config file
 //! 3. Default: 100
+//!
+//! The config file is located exactly as rustfmt locates it. With `--config-path`, it is that file, or the `.rustfmt.toml` or
+//! `rustfmt.toml` directly inside that directory. Otherwise, for each file, the search covers the file's directory and each
+//! ancestor up to the filesystem root, then the home directory, then `<user config dir>/rustfmt`. For stdin, the search starts in
+//! the current directory.
 
 use clap::Parser;
 use glob::glob;
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap};
 use std::env;
 use std::fs;
 use std::io::{self, Read as _};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process;
 
 #[derive(Parser)]
@@ -55,6 +60,10 @@ struct Cli {
     /// Maximum line width
     #[arg(long, short = 'w')]
     max_width: Option<usize>,
+
+    /// Use this rustfmt config file, or the one directly inside this directory, instead of searching for one
+    #[arg(long, value_name = "PATH")]
+    config_path: Option<PathBuf>,
 
     /// Preview mode - show what would change without modifying files
     #[arg(long)]
@@ -107,11 +116,13 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
     })
 }
 
-/// Returns `true` if `text` begins with a markdown-style structural marker.
+/// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
+/// indented).
 ///
 /// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`, `a.`),
 /// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
 fn starts_with_hierarchical_marker(text: &str) -> bool {
+    let text = text.trim_start();
     if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
         return true;
     }
@@ -313,7 +324,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         let comment = parse_comment_line(lines[i]);
 
         if let Some(ref c) = comment
-            && c.text.starts_with("```")
+            && c.text.trim_start().starts_with("```")
         {
             in_code_block = !in_code_block;
         }
@@ -361,13 +372,11 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         let new_lines = if combined_text.is_empty() {
             vec![base.trim_end().to_string()]
         } else if full_line.len() > max_width {
-            let marker_width = hierarchical_marker_width(&combined_text);
-            let cont = if marker_width > 0 {
-                format!("{prefix}{}", " ".repeat(marker_width))
-            } else {
-                prefix.clone()
-            };
-            wrap_text(&combined_text, &prefix, &cont, max_width)
+            // Leading spaces nest the text (e.g. a sub-list item), so every wrapped line keeps them.
+            let body = combined_text.trim_start();
+            let first = format!("{prefix}{}", &combined_text[..combined_text.len() - body.len()]);
+            let cont = format!("{first}{}", " ".repeat(hierarchical_marker_width(body)));
+            wrap_text(body, &first, &cont, max_width)
         } else {
             vec![full_line.trim_end().to_string()]
         };
@@ -388,67 +397,157 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     (output, changes)
 }
 
-/// Fallback line width when no CLI argument or `rustfmt.toml` config is found.
+/// Fallback line width when neither `--max-width` nor a config file sets one (rustfmt's default `max_width`).
 const DEFAULT_WIDTH: usize = 100;
 
-/// Searches for `.rustfmt.toml` or `rustfmt.toml` from the current directory up to `$HOME`, returning the `max_width` value and the
-/// config file path if found.
-///
-/// Stops at the first config file encountered. If that file exists but does not contain a `max_width` key, returns `None`.
-fn find_rustfmt_width() -> Option<(usize, PathBuf)> {
-    let home = env::var("HOME").ok().map(PathBuf::from);
-    let mut dir = env::current_dir().ok()?;
+/// Config file names rustfmt looks for in a directory, in priority order.
+const CONFIG_FILE_NAMES: [&str; 2] = [".rustfmt.toml", "rustfmt.toml"];
 
-    loop {
-        for name in &[".rustfmt.toml", "rustfmt.toml"] {
-            let candidate = dir.join(name);
-            if candidate.is_file() {
-                if let Ok(contents) = fs::read_to_string(&candidate)
-                    && let Ok(table) = contents.parse::<toml::Table>()
-                    && let Some(val) = table.get("max_width")
-                {
-                    return val.as_integer().map(|v| (v as usize, candidate.clone()));
-                }
-                return None;
-            }
+/// The part of a rustfmt config that this tool uses.
+#[derive(Clone, Debug, Default)]
+struct Config {
+    /// The config file this was loaded from, or `None` if no config file applies.
+    path: Option<PathBuf>,
+    max_width: Option<usize>,
+}
+
+impl Config {
+    /// Loads `max_width` from the config file at `path`. Like rustfmt, an unparsable file or an invalid `max_width` is an error.
+    fn from_file(path: PathBuf) -> Result<Self, String> {
+        let contents = fs::read_to_string(&path).map_err(|e| format!("Error reading config file {}: {e}", path.display()))?;
+        let table: toml::Table = contents
+            .parse()
+            .map_err(|e| format!("Error: could not parse config file {}: {e}", path.display()))?;
+        let max_width = match table.get("max_width") {
+            None => None,
+            Some(value) => Some(value.as_integer().and_then(|n| usize::try_from(n).ok()).ok_or_else(|| {
+                format!(
+                    "Error: invalid `max_width` in config file {}: expected a non-negative integer, found {value}",
+                    path.display()
+                )
+            })?),
+        };
+        Ok(Self {
+            path: Some(path),
+            max_width,
+        })
+    }
+
+    /// Returns the effective width (`--max-width` > config file > [`DEFAULT_WIDTH`]) and a description of its source.
+    fn width(&self, cli_width: Option<usize>) -> (usize, String) {
+        match (cli_width, self.max_width, &self.path) {
+            (Some(w), _, _) => (w, "from --max-width".to_string()),
+            (None, Some(w), Some(path)) => (w, format!("from {}", path.display())),
+            _ => (DEFAULT_WIDTH, "default".to_string()),
         }
+    }
+}
 
-        if home.as_ref().is_some_and(|h| dir == *h) || !dir.pop() {
+/// Returns the config file directly inside `dir`, preferring `.rustfmt.toml` over `rustfmt.toml`, as rustfmt does.
+fn get_toml_path(dir: &Path) -> Result<Option<PathBuf>, String> {
+    for name in CONFIG_FILE_NAMES {
+        let file = dir.join(name);
+        match fs::metadata(&file) {
+            // A directory with a config file's name is skipped.
+            Ok(md) if md.is_file() => {
+                return file
+                    .canonicalize()
+                    .map(Some)
+                    .map_err(|e| format!("Error resolving config file {}: {e}", file.display()));
+            }
+            Err(e) if e.kind() != io::ErrorKind::NotFound => {
+                return Err(format!("Failed to get metadata for config file {}: {e}", file.display()));
+            }
+            _ => {}
+        }
+    }
+    Ok(None)
+}
+
+/// Finds the config file that applies to files in `dir`, in rustfmt's search order: `dir` and each of its ancestors up to the
+/// filesystem root, then `home`, then `config_dir/rustfmt`.
+fn find_config_file(dir: &Path, home: Option<&Path>, config_dir: Option<&Path>) -> Result<Option<PathBuf>, String> {
+    let mut current = env::current_dir()
+        .and_then(|cwd| cwd.join(dir).canonicalize())
+        .map_err(|e| format!("Error resolving directory {}: {e}", dir.display()))?;
+    loop {
+        if let Some(path) = get_toml_path(&current)? {
+            return Ok(Some(path));
+        }
+        if !current.pop() {
             break;
         }
     }
-    None
+    for fallback in [home.map(Path::to_path_buf), config_dir.map(|d| d.join("rustfmt"))]
+        .into_iter()
+        .flatten()
+    {
+        if let Some(path) = get_toml_path(&fallback)? {
+            return Ok(Some(path));
+        }
+    }
+    Ok(None)
 }
 
-/// Resolves the effective line width: CLI argument > `rustfmt.toml` > [`DEFAULT_WIDTH`].
-fn resolve_width(cli_width: Option<usize>, verbose: bool) -> usize {
-    if let Some(w) = cli_width {
-        if verbose {
-            eprintln!("Width: {w} (from --max-width)");
-        }
-        return w;
+/// Loads the config that applies to files in `dir`.
+fn load_config(dir: &Path) -> Result<Config, String> {
+    match find_config_file(dir, dirs::home_dir().as_deref(), dirs::config_dir().as_deref())? {
+        Some(path) => Config::from_file(path),
+        None => Ok(Config::default()),
     }
-    if let Some((w, path)) = find_rustfmt_width() {
-        if verbose {
-            eprintln!("Width: {w} (from {})", path.display());
-        }
-        return w;
-    }
-    if verbose {
-        eprintln!("Width: {DEFAULT_WIDTH} (default)");
-    }
-    DEFAULT_WIDTH
+}
+
+/// Loads the config named by `--config-path`, as rustfmt does: a file is used as is, and a directory must directly contain
+/// `.rustfmt.toml` or `rustfmt.toml` (its ancestors are not searched).
+fn load_explicit_config(path: &Path) -> Result<Config, String> {
+    let not_found = || format!("Error: unable to find a config file for the given path: `{}`", path.display());
+    let file = if !path.exists() {
+        return Err(not_found());
+    } else if path.is_dir() {
+        get_toml_path(path)?.ok_or_else(not_found)?
+    } else {
+        path.to_path_buf()
+    };
+    Config::from_file(file)
+}
+
+/// Prints `message` to stderr and exits with status 1.
+fn exit_with(message: &str) -> ! {
+    eprintln!("{message}");
+    process::exit(1)
 }
 
 fn main() {
     let CargoCli::WrapComments(cli) = CargoCli::parse();
     let verbose = cli.verbose;
     let quiet = cli.quiet && !verbose;
-    let width = resolve_width(cli.max_width, verbose);
+
+    // Like rustfmt, config file errors are fatal even when `--max-width` overrides the config's value.
+    let explicit_config = cli
+        .config_path
+        .as_deref()
+        .map(load_explicit_config)
+        .transpose()
+        .unwrap_or_else(|e| exit_with(&e));
 
     if cli.files.is_empty() {
+        // rustfmt resolves the config for stdin from the current directory.
+        let config = explicit_config
+            .map_or_else(|| load_config(Path::new(".")), Ok)
+            .unwrap_or_else(|e| exit_with(&e));
+        let (width, source) = config.width(cli.max_width);
+        if verbose {
+            eprintln!("Width: {width} ({source})");
+        }
         process_stdin(width, cli.check);
         return;
+    }
+
+    // Without `--max-width` or `--config-path`, each file's width comes from the config that applies to its directory.
+    let per_file_width = cli.max_width.is_none() && explicit_config.is_none();
+    if verbose && !per_file_width {
+        let (width, source) = explicit_config.clone().unwrap_or_default().width(cli.max_width);
+        eprintln!("Width: {width} ({source})");
     }
 
     let mut file_paths = BTreeSet::new();
@@ -492,10 +591,31 @@ fn main() {
         eprintln!("Found {} file(s) to process.", file_paths.len());
     }
 
+    // Resolve every width before modifying anything, so a bad config file aborts the run without partial changes.
+    let mut dir_configs: HashMap<PathBuf, Config> = HashMap::new();
+    let mut widths = Vec::with_capacity(file_paths.len());
+    for path in &file_paths {
+        let config = match &explicit_config {
+            Some(config) => config,
+            None => {
+                let dir = path.parent().unwrap_or(Path::new("."));
+                if !dir_configs.contains_key(dir) {
+                    let config = load_config(dir).unwrap_or_else(|e| exit_with(&e));
+                    dir_configs.insert(dir.to_path_buf(), config);
+                }
+                &dir_configs[dir]
+            }
+        };
+        widths.push(config.width(cli.max_width));
+    }
+
     let mut files_processed = 0;
     let mut files_modified = 0;
 
-    for path in &file_paths {
+    for (path, (width, source)) in file_paths.iter().zip(widths) {
+        if verbose && per_file_width {
+            eprintln!("Width: {width} ({source}) for {}", path.display());
+        }
         let Ok(content) = fs::read_to_string(path) else {
             if verbose {
                 eprintln!("{}:", path.display());
@@ -735,6 +855,140 @@ mod tests {
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_indented_sub_list_items() {
+        let input = "//! 1. item\n//!    - sub one\n//!    - sub two\n//!    * sub three\n//!    2. sub four\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_combine_sub_list_item_continuation() {
+        let input = "//!    - aaa\n//!      bbb\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "//!    - aaa bbb\n");
+    }
+
+    #[test]
+    fn test_wrap_sub_list_item_keeps_indent() {
+        let input = "//!    - aaa bbb ccc ddd\n";
+        let (output, _) = process_content(input, 20);
+        assert_eq!(output, "//!    - aaa bbb ccc\n//!      ddd\n");
+        // Re-processing the wrapped output is stable.
+        let (again, changes) = process_content(&output, 20);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_indented_text_keeps_indent() {
+        let input = "// x\n//\n//   aaa bbb ccc ddd\n";
+        let (output, _) = process_content(input, 16);
+        assert_eq!(output, "// x\n//\n//   aaa bbb ccc\n//   ddd\n");
+    }
+
+    #[test]
+    fn test_indented_code_fence_in_list_item() {
+        let input = "/// - item\n///   ```\n///   let a = 1;\n///   let b = 2;\n///   ```\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    /// Creates `project/src`, `home`, and `config/rustfmt` under a temporary root.
+    fn config_search_tree() -> (tempfile::TempDir, PathBuf, PathBuf, PathBuf) {
+        let root = tempfile::tempdir().unwrap();
+        let src = root.path().join("project").join("src");
+        let home = root.path().join("home");
+        let config_dir = root.path().join("config");
+        fs::create_dir_all(&src).unwrap();
+        fs::create_dir_all(&home).unwrap();
+        fs::create_dir_all(config_dir.join("rustfmt")).unwrap();
+        (root, src, home, config_dir)
+    }
+
+    #[test]
+    fn test_find_config_file_ancestor_before_home_and_config_dir() {
+        let (root, src, home, config_dir) = config_search_tree();
+        let project_config = root.path().join("project").join("rustfmt.toml");
+        fs::write(&project_config, "").unwrap();
+        fs::write(home.join(".rustfmt.toml"), "").unwrap();
+        fs::write(config_dir.join("rustfmt").join("rustfmt.toml"), "").unwrap();
+        let found = find_config_file(&src, Some(&home), Some(&config_dir)).unwrap();
+        assert_eq!(found, Some(project_config.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_find_config_file_falls_back_to_home() {
+        let (_root, src, home, config_dir) = config_search_tree();
+        let home_config = home.join(".rustfmt.toml");
+        fs::write(&home_config, "").unwrap();
+        fs::write(config_dir.join("rustfmt").join("rustfmt.toml"), "").unwrap();
+        let found = find_config_file(&src, Some(&home), Some(&config_dir)).unwrap();
+        assert_eq!(found, Some(home_config.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_find_config_file_falls_back_to_config_dir() {
+        let (_root, src, home, config_dir) = config_search_tree();
+        let user_config = config_dir.join("rustfmt").join("rustfmt.toml");
+        fs::write(&user_config, "").unwrap();
+        let found = find_config_file(&src, Some(&home), Some(&config_dir)).unwrap();
+        assert_eq!(found, Some(user_config.canonicalize().unwrap()));
+    }
+
+    #[test]
+    fn test_find_config_file_none() {
+        let (_root, src, home, config_dir) = config_search_tree();
+        assert_eq!(find_config_file(&src, Some(&home), Some(&config_dir)).unwrap(), None);
+    }
+
+    #[test]
+    fn test_get_toml_path_skips_directory_with_config_name() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::create_dir(dir.path().join(".rustfmt.toml")).unwrap();
+        let config = dir.path().join("rustfmt.toml");
+        fs::write(&config, "").unwrap();
+        assert_eq!(get_toml_path(dir.path()).unwrap(), Some(config.canonicalize().unwrap()));
+    }
+
+    fn config_from(contents: &str) -> Result<Config, String> {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rustfmt.toml");
+        fs::write(&path, contents).unwrap();
+        Config::from_file(path)
+    }
+
+    #[test]
+    fn test_config_max_width() {
+        assert_eq!(config_from("max_width = 120\n").unwrap().max_width, Some(120));
+        assert_eq!(config_from("edition = \"2024\"\n").unwrap().max_width, None);
+        assert_eq!(config_from("").unwrap().max_width, None);
+    }
+
+    #[test]
+    fn test_config_errors() {
+        assert!(config_from("max_width = ").unwrap_err().contains("could not parse"));
+        assert!(
+            config_from("max_width = \"wide\"\n")
+                .unwrap_err()
+                .contains("invalid `max_width`")
+        );
+        assert!(config_from("max_width = -1\n").unwrap_err().contains("invalid `max_width`"));
+    }
+
+    #[test]
+    fn test_config_width_precedence() {
+        let config = Config {
+            path: Some(PathBuf::from("rustfmt.toml")),
+            max_width: Some(120),
+        };
+        assert_eq!(config.width(Some(80)).0, 80);
+        assert_eq!(config.width(None).0, 120);
+        assert_eq!(Config::default().width(None), (DEFAULT_WIDTH, "default".to_string()));
     }
 
     #[test]
@@ -1003,16 +1257,6 @@ mod tests {
             !lines.iter().any(|l| l.ends_with("` ``") || l.ends_with("`` `")),
             "backtick span was split across lines: {lines:?}"
         );
-    }
-
-    #[test]
-    fn test_resolve_width_cli_overrides() {
-        assert_eq!(resolve_width(Some(80), false), 80);
-    }
-
-    #[test]
-    fn test_resolve_width_default() {
-        assert!(resolve_width(None, false) > 0);
     }
 
     #[test]
