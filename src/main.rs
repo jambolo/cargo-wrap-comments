@@ -116,14 +116,31 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
     })
 }
 
+/// Returns the fence character and length if `text`, ignoring leading whitespace, starts with a code fence: three or more
+/// backticks or tildes (e.g. `` ``` ``, `~~~~`).
+fn code_fence(text: &str) -> Option<(char, usize)> {
+    let text = text.trim_start();
+    let first @ ('`' | '~') = text.chars().next()? else {
+        return None;
+    };
+    let len = text.chars().take_while(|&c| c == first).count();
+    (len >= 3).then_some((first, len))
+}
+
+/// Returns `true` if `text` closes a code block opened by `open`: a fence of the same character, at least as long, followed only
+/// by whitespace.
+fn closes_code_fence(text: &str, open: (char, usize)) -> bool {
+    code_fence(text).is_some_and(|(c, len)| c == open.0 && len >= open.1 && text.trim_start()[len..].trim().is_empty())
+}
+
 /// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
 /// indented).
 ///
-/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`, `a.`),
+/// Recognized markers: `#`, `*`, `-`, a code fence (`` ``` `` or `~~~`), a single letter followed by `.` (e.g. `A.`, `a.`),
 /// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     let text = text.trim_start();
-    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
+    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || code_fence(text).is_some() {
         return true;
     }
     let mut chars = text.chars();
@@ -205,8 +222,8 @@ fn is_thematic_break(text: &str) -> bool {
 /// Determines whether two adjacent comment lines should be combined.
 ///
 /// Lines are combined when they share the same marker and indentation, neither is blank, a divider, or a thematic break, the next
-/// line doesn't start with a hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line
-/// (starting with `#`) is not combined with the text that follows.
+/// line doesn't start with a hierarchical marker, the current line doesn't start with or contain a code fence, and a markdown
+/// heading line (starting with `#`) is not combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
@@ -218,6 +235,7 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !is_thematic_break(&next.text)
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
+        && code_fence(&current.text).is_none()
         && !current.text.starts_with('#')
 }
 
@@ -328,24 +346,27 @@ fn print_changes(changes: &[Change], header: Option<&str>) {
 /// Processes an entire file's content, combining and wrapping comments.
 ///
 /// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
-/// (`` ``` ``) are passed through unchanged.
+/// (`` ``` `` or `~~~`) are passed through unchanged.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
     let mut result: Vec<String> = Vec::new();
     let mut changes: Vec<Change> = Vec::new();
     let mut i = 0;
-    let mut in_code_block = false;
+    // The opening fence of the code block being passed through, if any.
+    let mut open_fence: Option<(char, usize)> = None;
 
     while i < lines.len() {
         let comment = parse_comment_line(lines[i]);
 
-        if let Some(ref c) = comment
-            && c.text.trim_start().starts_with("```")
-        {
-            in_code_block = !in_code_block;
+        if let Some(ref c) = comment {
+            match open_fence {
+                Some(open) if closes_code_fence(&c.text, open) => open_fence = None,
+                Some(_) => {}
+                None => open_fence = code_fence(&c.text),
+            }
         }
 
-        let passthrough = comment.is_none() || in_code_block;
+        let passthrough = comment.is_none() || open_fence.is_some();
         if passthrough {
             result.push(lines[i].to_string());
             i += 1;
@@ -747,6 +768,7 @@ mod tests {
         assert!(starts_with_hierarchical_marker("A. lettered"));
         assert!(starts_with_hierarchical_marker("a. lower"));
         assert!(starts_with_hierarchical_marker("```code"));
+        assert!(starts_with_hierarchical_marker("~~~"));
         assert!(!starts_with_hierarchical_marker("normal text"));
     }
 
@@ -1107,6 +1129,45 @@ mod tests {
         let input = "// ```\n// code\n// ```\n// hello\n// world\n";
         let (output, _) = process_content(input, 132);
         assert_eq!(output, "// ```\n// code\n// ```\n// hello world\n");
+    }
+
+    #[test]
+    fn test_code_fence() {
+        assert_eq!(code_fence("```"), Some(('`', 3)));
+        assert_eq!(code_fence("```rust"), Some(('`', 3)));
+        assert_eq!(code_fence("  ~~~~"), Some(('~', 4)));
+        assert_eq!(code_fence("~~"), None);
+        assert_eq!(code_fence("``"), None);
+        assert_eq!(code_fence("text ```"), None);
+        assert!(closes_code_fence("~~~", ('~', 3)));
+        assert!(closes_code_fence("~~~~~  ", ('~', 3)));
+        assert!(!closes_code_fence("~~~", ('~', 4)));
+        assert!(!closes_code_fence("```", ('~', 3)));
+        assert!(!closes_code_fence("~~~ rust", ('~', 3)));
+    }
+
+    #[test]
+    fn test_no_wrap_or_combine_inside_tilde_fence() {
+        let input = "    /// ~~~\n    /// # use ring_buffer::{Drain, RingBuffer};\n    /// let mut buffer = RingBuffer::with_capacity(3).unwrap();\n    /// buffer.push(\"x\").unwrap();\n    /// assert_eq!(buffer.drain_all(), [\"x\"]); // a long trailing comment that is much wider than the configured width\n    /// ~~~\n";
+        let (output, changes) = process_content(input, 60);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_wrap_inside_tilde_fence_plain_comment() {
+        let input = "// ~~~\n// Tilde fence in a plain comment, followed by a very long line.\n// ~~~\n";
+        let (output, changes) = process_content(input, 40);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_fence_closed_only_by_matching_fence() {
+        // A backtick fence and a shorter tilde fence do not close a `~~~~` block.
+        let input = "// ~~~~\n// ```\n// ~~~\n// one\n// two\n// ~~~~\n// hello\n// world\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// ~~~~\n// ```\n// ~~~\n// one\n// two\n// ~~~~\n// hello world\n");
     }
 
     #[test]
