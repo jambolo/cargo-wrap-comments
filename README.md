@@ -89,6 +89,8 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 7. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
 8. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
 
+Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` ``) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation.
+
 ## Width Resolution
 
 The line width is resolved in this order:

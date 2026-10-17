@@ -325,24 +325,83 @@ fn print_changes(changes: &[Change], header: Option<&str>) {
     }
 }
 
+/// Returns the indentation of `text` in columns, with tabs advancing to the next multiple of 4 as in CommonMark.
+fn leading_indent(text: &str) -> usize {
+    let mut width = 0;
+    for c in text.chars() {
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => break,
+        }
+    }
+    width
+}
+
+/// Returns the column at which the content of a list item starts (e.g. `  - item` → 4), or `None` if `text` is not a list item.
+fn list_content_column(text: &str) -> Option<usize> {
+    let body = text.trim_start();
+    if body.starts_with('#') {
+        return None;
+    }
+    match hierarchical_marker_width(body) {
+        0 => None,
+        width => Some(leading_indent(text) + width),
+    }
+}
+
 /// Processes an entire file's content, combining and wrapping comments.
 ///
 /// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
-/// (`` ``` ``) are passed through unchanged.
+/// (`` ``` `` fences or CommonMark indented code blocks) are passed through unchanged.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
     let mut result: Vec<String> = Vec::new();
     let mut changes: Vec<Change> = Vec::new();
     let mut i = 0;
     let mut in_code_block = false;
+    let mut in_indented_code = false;
+    // The indent and marker of the previous line if it is a comment, and whether its text is blank.
+    let mut prev: Option<(String, String, bool)> = None;
+    // Where the content of the most recent list item in the comment block starts. Indented code inside the item is indented 4
+    // columns past it.
+    let mut list_column: Option<usize> = None;
 
     while i < lines.len() {
         let comment = parse_comment_line(lines[i]);
 
-        if let Some(ref c) = comment
-            && c.text.trim_start().starts_with("```")
-        {
-            in_code_block = !in_code_block;
+        if let Some(ref c) = comment {
+            let same_block = prev
+                .as_ref()
+                .is_some_and(|(indent, marker, _)| *indent == c.indent && *marker == c.marker);
+            if !same_block {
+                list_column = None;
+            }
+            let blank = c.text.trim().is_empty();
+            let indent = leading_indent(&c.text);
+            let code_indent = list_column.unwrap_or(0) + 4;
+            if in_indented_code && (!same_block || (!blank && indent < code_indent)) {
+                in_indented_code = false;
+            }
+            // An indented code block cannot interrupt a paragraph, so it starts only after a blank line or at the block start.
+            let prev_blank = prev.as_ref().is_none_or(|(_, _, blank)| *blank);
+            if !in_code_block && !blank && indent >= code_indent && (!same_block || prev_blank) {
+                in_indented_code = true;
+            }
+            prev = Some((c.indent.clone(), c.marker.clone(), blank));
+
+            if in_indented_code {
+                if !blank {
+                    result.push(lines[i].to_string());
+                    i += 1;
+                    continue;
+                }
+            } else if c.text.trim_start().starts_with("```") {
+                in_code_block = !in_code_block;
+            }
+        } else {
+            prev = None;
+            in_indented_code = false;
         }
 
         let passthrough = comment.is_none() || in_code_block;
@@ -353,6 +412,11 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         }
 
         let comment = comment.unwrap();
+        if let Some(column) = list_content_column(&comment.text) {
+            list_column = Some(column);
+        } else if list_column.is_some_and(|column| !comment.text.trim().is_empty() && leading_indent(&comment.text) < column) {
+            list_column = None;
+        }
 
         let mut combined_text = comment.text.clone();
         let start_line = i;
@@ -942,6 +1006,67 @@ mod tests {
         let (output, changes) = process_content(input, 100);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_code_block_not_wrapped() {
+        let input = "    /// The result is `(sum2 << 8) | sum1`.\n    ///\n    ///     This line is an indented code block, because it is indented by four spaces and preceded by a blank line. It must not be wrapped or combined.\n    ///\n    /// [Fletcher-16]: https://en.wikipedia.org/wiki/Fletcher%27s_checksum#Fletcher-16\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_code_block_not_combined() {
+        let input = "///\n///     let a = 1;\n///     let b = 2;\n///\n///     let c = 3;\n/// Text after the code block.\n/// More text.\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "///\n///     let a = 1;\n///     let b = 2;\n///\n///     let c = 3;\n/// Text after the code block. More text.\n"
+        );
+    }
+
+    #[test]
+    fn test_indented_code_block_at_block_start() {
+        let input = "fn f() {}\n///     let a = 1;\n///     let b = 2;\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_line_after_text_is_not_code() {
+        // An indented code block cannot interrupt a paragraph.
+        let input = "/// text\n///     more text\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "/// text more text\n");
+    }
+
+    #[test]
+    fn test_indented_code_block_in_list_item() {
+        // Inside a list item, code is indented 4 columns past the start of the item's content.
+        let input = "/// - item\n///\n///     nested paragraph\n///     continued\n///\n///       code a\n///       code b\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "/// - item\n///\n///     nested paragraph continued\n///\n///       code a\n///       code b\n"
+        );
+    }
+
+    #[test]
+    fn test_indented_fence_inside_indented_code_block() {
+        let input = "///\n///     ```\n///     code\n/// text\n/// more\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "///\n///     ```\n///     code\n/// text more\n");
+    }
+
+    #[test]
+    fn test_leading_indent() {
+        assert_eq!(leading_indent("text"), 0);
+        assert_eq!(leading_indent("    text"), 4);
+        assert_eq!(leading_indent("\ttext"), 4);
+        assert_eq!(leading_indent("  \ttext"), 4);
+        assert_eq!(leading_indent("   "), 3);
     }
 
     /// Creates `project/src`, `home`, and `config/rustfmt` under a temporary root.
