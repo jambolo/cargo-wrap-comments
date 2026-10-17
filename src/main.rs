@@ -202,11 +202,40 @@ fn is_thematic_break(text: &str) -> bool {
     body.chars().all(|c| c == first || c == ' ' || c == '\t') && body.chars().filter(|&c| c == first).count() >= 3
 }
 
+/// Returns `true` if `text` starts with an SPDX tag (e.g. `SPDX-License-Identifier:`). SPDX tools read a tag's value up to the
+/// end of the line, so such a line is never combined or wrapped.
+fn is_spdx_line(text: &str) -> bool {
+    text.strip_prefix("SPDX-")
+        .and_then(|rest| rest.split_once(':'))
+        .is_some_and(|(name, _)| !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '-'))
+}
+
+/// Annotation tags that start a new note, e.g. `TODO:` or `FIXME(name):`.
+const ANNOTATION_TAGS: [&str; 6] = ["TODO", "FIXME", "NOTE", "HACK", "XXX", "SAFETY"];
+
+/// Returns `true` if `text` starts with an annotation tag, optionally followed by `(...)`, then `:` (e.g. `TODO:`,
+/// `TODO(name):`).
+fn starts_with_annotation_tag(text: &str) -> bool {
+    ANNOTATION_TAGS.iter().any(|tag| {
+        let Some(rest) = text.strip_prefix(tag) else {
+            return false;
+        };
+        let rest = match rest.strip_prefix('(') {
+            Some(inner) => match inner.split_once(')') {
+                Some((_, after)) => after,
+                None => return false,
+            },
+            None => rest,
+        };
+        rest.starts_with(':')
+    })
+}
+
 /// Determines whether two adjacent comment lines should be combined.
 ///
-/// Lines are combined when they share the same marker and indentation, neither is blank, a divider, or a thematic break, the next
-/// line doesn't start with a hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line
-/// (starting with `#`) is not combined with the text that follows.
+/// Lines are combined when they share the same marker and indentation, neither is blank, a divider, a thematic break, or an SPDX
+/// tag, the next line doesn't start with a hierarchical marker or an annotation tag, the current line doesn't contain a code
+/// fence, and a markdown heading line (starting with `#`) is not combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
@@ -216,6 +245,9 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !is_divider(&next.text)
         && !is_thematic_break(&current.text)
         && !is_thematic_break(&next.text)
+        && !is_spdx_line(&current.text)
+        && !is_spdx_line(&next.text)
+        && !starts_with_annotation_tag(&next.text)
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
         && !current.text.starts_with('#')
@@ -345,7 +377,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
             in_code_block = !in_code_block;
         }
 
-        let passthrough = comment.is_none() || in_code_block;
+        let passthrough = in_code_block || comment.as_ref().is_none_or(|c| is_spdx_line(&c.text));
         if passthrough {
             result.push(lines[i].to_string());
             i += 1;
@@ -877,6 +909,58 @@ mod tests {
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_is_spdx_line() {
+        assert!(is_spdx_line("SPDX-License-Identifier: MIT OR Apache-2.0"));
+        assert!(is_spdx_line("SPDX-FileCopyrightText: 2026 Example Authors"));
+        assert!(!is_spdx_line("SPDX-: MIT"));
+        assert!(!is_spdx_line("SPDX-License Identifier: MIT"));
+        assert!(!is_spdx_line("SPDX license identifiers are tags"));
+        assert!(!is_spdx_line("See SPDX-License-Identifier: MIT"));
+    }
+
+    #[test]
+    fn test_starts_with_annotation_tag() {
+        for text in [
+            "TODO: x",
+            "FIXME: x",
+            "NOTE: x",
+            "HACK: x",
+            "XXX: x",
+            "SAFETY: x",
+            "TODO(someone): x",
+            "FIXME():",
+        ] {
+            assert!(starts_with_annotation_tag(text), "{text:?}");
+        }
+        for text in ["TODO x", "TODOS: x", "todo: x", "TODO(someone x", "TODO(a) : x", "A TODO: x"] {
+            assert!(!starts_with_annotation_tag(text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn test_spdx_line_not_combined_or_wrapped() {
+        let input = "// Copyright (c) 2026 Example Authors.\n// SPDX-License-Identifier: MIT OR Apache-2.0\n// See the LICENSE files for details.\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+
+        let input = "// SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception\n";
+        let (output, changes) = process_content(input, 30);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_annotation_tag_starts_new_paragraph() {
+        let input = "// Some text.\n// TODO(someone): first note\n// continues here.\n// FIXME: Short FIXME.\n// NOTE: x\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// Some text.\n// TODO(someone): first note continues here.\n// FIXME: Short FIXME.\n// NOTE: x\n"
+        );
     }
 
     #[test]

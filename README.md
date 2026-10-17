@@ -88,6 +88,8 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 6. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
 7. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
 8. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
+9. Neither line starts with an SPDX tag (e.g. `SPDX-License-Identifier:`). SPDX lines are also never wrapped.
+10. The next line does not start with an annotation tag (`TODO`, `FIXME`, `NOTE`, `HACK`, `XXX` or `SAFETY`, optionally followed by `(...)`, then `:`). Lines after a tagged line may still be combined into it.
 
 ## Width Resolution
 
