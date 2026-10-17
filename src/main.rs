@@ -43,6 +43,7 @@ use std::fs;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::process;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Parser)]
 #[command(name = "cargo", bin_name = "cargo")]
@@ -288,11 +289,11 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
 
     for word in &words {
         let pfx = if lines.is_empty() { prefix } else { continuation_prefix };
-        let available = max_width.saturating_sub(pfx.len()).max(1);
+        let available = max_width.saturating_sub(pfx.width()).max(1);
 
         if current_line.is_empty() {
             current_line.push_str(word);
-        } else if current_line.len() + 1 + word.len() <= available {
+        } else if current_line.width() + 1 + word.width() <= available {
             current_line.push(' ');
             current_line.push_str(word);
         } else {
@@ -387,7 +388,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
 
         let new_lines = if combined_text.is_empty() {
             vec![base.trim_end().to_string()]
-        } else if full_line.len() > max_width {
+        } else if full_line.width() > max_width {
             // Leading spaces nest the text (e.g. a sub-list item), so every wrapped line keeps them.
             let body = combined_text.trim_start();
             let first = format!("{prefix}{}", &combined_text[..combined_text.len() - body.len()]);
@@ -1041,6 +1042,26 @@ mod tests {
     fn test_wrap_text() {
         let result = wrap_text("hello world foo bar baz", "// ", "// ", 15);
         assert_eq!(result, vec!["// hello world", "// foo bar baz"]);
+    }
+
+    #[test]
+    fn test_non_ascii_width_counts_columns() {
+        // 28 columns but 34 bytes: fits within 30 columns.
+        let input = "// naïve café résumé déjà vu\n";
+        let (output, changes) = process_content(input, 30);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wide_chars_count_two_columns() {
+        // Each CJK character is 2 columns wide: "// 日本語 テキスト" is 18 columns (34 bytes).
+        let input = "// 日本語 テキスト\n";
+        let (output, changes) = process_content(input, 18);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+        let (output, _) = process_content(input, 17);
+        assert_eq!(output, "// 日本語\n// テキスト\n");
     }
 
     #[test]
