@@ -119,11 +119,11 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
 /// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
 /// indented).
 ///
-/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`, `a.`),
-/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
+/// Recognized markers: an ATX heading (see [`is_atx_heading`]), `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`,
+/// `a.`), or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     let text = text.trim_start();
-    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
+    if is_atx_heading(text) || matches!(text.as_bytes().first(), Some(b'*' | b'-')) || text.starts_with("```") {
         return true;
     }
     let mut chars = text.chars();
@@ -145,11 +145,18 @@ fn starts_with_hierarchical_marker(text: &str) -> bool {
     false
 }
 
+/// Returns `true` if `text` is a CommonMark ATX heading: 1 to 6 `#` characters followed by a space, a tab, or the end of the line.
+/// `#42`, `#hashtag`, and `####### seven` are not headings.
+fn is_atx_heading(text: &str) -> bool {
+    let hashes = text.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes) && matches!(text.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
+}
+
 /// Returns the width of a hierarchical marker prefix (e.g. `- ` → 2, `1. ` → 3, `10. ` → 4, `## ` → 3).
 ///
 /// Returns 0 if the text does not start with a recognized marker.
 fn hierarchical_marker_width(text: &str) -> usize {
-    if text.starts_with('#') {
+    if is_atx_heading(text) {
         let hashes = text.bytes().take_while(|&b| b == b'#').count();
         if text.as_bytes().get(hashes) == Some(&b' ') {
             return hashes + 1;
@@ -206,7 +213,7 @@ fn is_thematic_break(text: &str) -> bool {
 ///
 /// Lines are combined when they share the same marker and indentation, neither is blank, a divider, or a thematic break, the next
 /// line doesn't start with a hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line
-/// (starting with `#`) is not combined with the text that follows.
+/// (see [`is_atx_heading`]) is not combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
@@ -218,7 +225,7 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !is_thematic_break(&next.text)
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
-        && !current.text.starts_with('#')
+        && !is_atx_heading(&current.text)
 }
 
 /// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or ` `` ` as single tokens even if
@@ -831,6 +838,32 @@ mod tests {
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_is_atx_heading() {
+        assert!(is_atx_heading("# Heading"));
+        assert!(is_atx_heading("###### Six"));
+        assert!(is_atx_heading("##\tTab"));
+        assert!(is_atx_heading("#"));
+        assert!(!is_atx_heading("#42 is an issue"));
+        assert!(!is_atx_heading("#hashtag"));
+        assert!(!is_atx_heading("#[derive(Debug)]"));
+        assert!(!is_atx_heading("####### seven"));
+        assert!(!is_atx_heading("text"));
+        assert!(!is_atx_heading(""));
+        assert!(!starts_with_hierarchical_marker("#42 is an issue"));
+        assert_eq!(hierarchical_marker_width("####### seven"), 0);
+    }
+
+    #[test]
+    fn test_combine_lines_starting_with_hash_that_are_not_headings() {
+        let input = "// See issue #42 for details.\n// #42 is the same issue, but this line starts with a hash.\n// This line follows it.\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// See issue #42 for details. #42 is the same issue, but this line starts with a hash. This line follows it.\n"
+        );
     }
 
     #[test]

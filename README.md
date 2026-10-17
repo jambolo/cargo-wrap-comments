@@ -83,9 +83,9 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 1. Same comment marker (`//`, `///`, or `//!`)
 2. Same indentation level
 3. Neither line is blank
-4. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `1.`, `A.`, `a.`
+4. The next line does not start with a hierarchical marker: a heading (`#`), `*`, `-`, `` ``` ``, `1.`, `A.`, `a.`
 5. The current line does not contain a code fence marker (`` ``` ``)
-6. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
+6. The current line is not a markdown heading (1 to 6 `#` characters followed by a space, a tab, or the end of the line, so `#42` and `#hashtag` are not headings). Headings are not combined with the text that follows.
 7. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
 8. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
 
