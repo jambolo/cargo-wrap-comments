@@ -648,9 +648,9 @@ const KNOWN_CHECKSUMS: [(&[u8], u16); 3] = [
 // ~~~
 // Tilde fence in a plain comment, followed by a very long line that a tool which recognizes only backtick fences will combine and wrap.
 // ~~~
-// ***
-// ===
-// _ _ _
+// ++++++++
+// ====
+// ##########
 //
 // The line above is blank, and the three lines above it are dividers. This line ends the block, at exactly the right length to fit.
 //
@@ -824,3 +824,26 @@ fn deeply_nested_comments() {
     }
     assert_eq!(buffer.iter().copied().collect::<Vec<_>>(), [0, 2]);
 }
+
+// Thematic breaks. A line consisting of up to three spaces of indentation and three or more matching `-`, `_`, or `*` characters,
+// each optionally followed by spaces or tabs, is a thematic break and must not be combined with the line above or below it.
+// ---
+// Text between two breaks written with hyphens.
+// ***
+// Text between two breaks written with asterisks.
+// ___
+// - - -
+// * * *
+// _ _ _
+// -	-	-
+// The break above is separated by tabs.
+//    ---
+// The break above is indented by three spaces, the most that is allowed.
+//
+// The next line is indented by four spaces, so it is not a thematic break.
+//     ---
+// --
+// --- a
+// -*-
+//
+// None of the four lines above is a thematic break, but each one starts with `-`, so it starts a new paragraph.

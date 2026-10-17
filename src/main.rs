@@ -178,21 +178,35 @@ fn hierarchical_marker_width(text: &str) -> usize {
     0
 }
 
-/// Returns `true` if `text` is a divider: three or more repetitions of a single punctuation character (e.g. `---`, `=====`,
-/// `*****`, `~~~`), optionally separated by spaces.
+/// Returns `true` if `text` is a divider: four or more repetitions of a single punctuation character (e.g. `----`, `=====`,
+/// `*****`, `~~~~`), optionally separated by spaces. Three is too few because markdown uses `---`/`***`/`~~~` and `///` is a
+/// doc comment marker.
 fn is_divider(text: &str) -> bool {
     let mut chars = text.chars().filter(|c| !c.is_whitespace());
     let Some(first) = chars.next() else {
         return false;
     };
-    first.is_ascii_punctuation() && first != '`' && chars.clone().all(|c| c == first) && chars.count() >= 2
+    first.is_ascii_punctuation() && first != '`' && chars.clone().all(|c| c == first) && chars.count() >= 3
+}
+
+/// Returns `true` if `text` is a markdown thematic break: up to three spaces of indentation, then three or more matching `-`, `_`,
+/// or `*` characters, each optionally followed by spaces or tabs (e.g. `---`, `***`, `_ _ _`).
+fn is_thematic_break(text: &str) -> bool {
+    let body = text.trim_start_matches(' ');
+    if text.len() - body.len() > 3 {
+        return false;
+    }
+    let Some(first @ ('-' | '_' | '*')) = body.chars().next() else {
+        return false;
+    };
+    body.chars().all(|c| c == first || c == ' ' || c == '\t') && body.chars().filter(|&c| c == first).count() >= 3
 }
 
 /// Determines whether two adjacent comment lines should be combined.
 ///
-/// Lines are combined when they share the same marker and indentation, neither is blank or a divider, the next line doesn't start
-/// with a hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line (starting with `#`) is
-/// not combined with the text that follows.
+/// Lines are combined when they share the same marker and indentation, neither is blank, a divider, or a thematic break, the next
+/// line doesn't start with a hierarchical marker, the current line doesn't contain a code fence, and a markdown heading line
+/// (starting with `#`) is not combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
@@ -200,6 +214,8 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !next.text.is_empty()
         && !is_divider(&current.text)
         && !is_divider(&next.text)
+        && !is_thematic_break(&current.text)
+        && !is_thematic_break(&next.text)
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
         && !current.text.starts_with('#')
@@ -819,18 +835,48 @@ mod tests {
 
     #[test]
     fn test_is_divider() {
-        assert!(is_divider("---"));
+        assert!(is_divider("----"));
         assert!(is_divider("=========="));
         assert!(is_divider("**********"));
         assert!(is_divider("~~~~~"));
         assert!(is_divider("//////"));
         assert!(is_divider("- - - -"));
         assert!(!is_divider("--"));
+        assert!(!is_divider("---"));
+        assert!(!is_divider("///"));
+        assert!(!is_divider("- - -"));
         assert!(!is_divider("-=-=-="));
         assert!(!is_divider("```"));
         assert!(!is_divider("- item"));
         assert!(!is_divider("text"));
         assert!(!is_divider(""));
+    }
+
+    #[test]
+    fn test_is_thematic_break() {
+        assert!(is_thematic_break("---"));
+        assert!(is_thematic_break("***"));
+        assert!(is_thematic_break("___"));
+        assert!(is_thematic_break("_ _ _"));
+        assert!(is_thematic_break(" **  * ** * ** * **"));
+        assert!(is_thematic_break("   -\t-\t-  "));
+        assert!(is_thematic_break("-------------------------"));
+        assert!(!is_thematic_break("    ---"));
+        assert!(!is_thematic_break("--"));
+        assert!(!is_thematic_break("===="));
+        assert!(!is_thematic_break("~~~"));
+        assert!(!is_thematic_break("-*-"));
+        assert!(!is_thematic_break("--- a"));
+        assert!(!is_thematic_break("- item"));
+        assert!(!is_thematic_break(""));
+    }
+
+    #[test]
+    fn test_no_combine_thematic_break() {
+        let input = "// some text\n// ***\n// more text\n// _ _ _\n// ---\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
     }
 
     #[test]
