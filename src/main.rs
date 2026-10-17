@@ -1,7 +1,7 @@
 //! A CLI tool that reformats source code comments to wrap at a specified width.
 //!
 //! `cargo-wrap-comments` combines consecutive comment lines and re-wraps them to fit within a configurable line width, similar to
-//! what `rustfmt` does for code but applied to `//`, `///`, and `//!` comments.
+//! what `rustfmt` does for code but applied to `//`, `///`, and `//!` comments and to block doc comments (`/** */` and `/*! */`).
 //!
 //! # Usage
 //!
@@ -91,7 +91,8 @@ struct Cli {
 struct CommentLine {
     /// Leading whitespace before the comment marker.
     indent: String,
-    /// The comment marker (`//`, `///`, or `//!`).
+    /// The comment marker (`//`, `///`, or `//!`), or, in the body of a block doc comment, `*` (leading-asterisk style) or the
+    /// empty string (no-asterisk style).
     marker: String,
     /// The text content after the marker and optional space.
     text: String,
@@ -114,6 +115,115 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
             text: rest.strip_prefix(' ').unwrap_or(rest).to_string(),
         })
     })
+}
+
+/// Returns the block comment nesting depth at the end of `line`, given the depth at its start. Scanning stops when the outermost
+/// comment closes, so code after it on the same line is ignored.
+fn block_comment_depth(line: &str, mut depth: usize) -> usize {
+    let bytes = line.as_bytes();
+    let mut k = 0;
+    while k + 1 < bytes.len() {
+        match (bytes[k], bytes[k + 1]) {
+            (b'/', b'*') => {
+                depth += 1;
+                k += 2;
+            }
+            (b'*', b'/') => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    return 0;
+                }
+                k += 2;
+            }
+            _ => k += 1,
+        }
+    }
+    depth
+}
+
+/// Returns `true` if `trimmed` opens a multi-line block doc comment: `/**` or `/*!` with nothing after it. `/***` and `/**/` are
+/// plain block comments.
+fn is_block_doc_opener(trimmed: &str) -> bool {
+    trimmed
+        .strip_prefix("/**")
+        .or_else(|| trimmed.strip_prefix("/*!"))
+        .is_some_and(|rest| rest.trim().is_empty())
+}
+
+/// Parses the lines between the opening and closing lines of a block doc comment.
+///
+/// If every non-blank line starts with `*` followed by a space or the end of the line, the `*` is the marker. Otherwise the
+/// common leading whitespace is the indent and the marker is empty. Blank lines and lines containing a nested block comment
+/// delimiter are not parsed.
+fn parse_block_doc_body(body: &[&str]) -> Vec<Option<CommentLine>> {
+    let text_lines = || body.iter().filter(|line| !line.trim().is_empty());
+    let asterisk = text_lines().all(|line| {
+        let t = line.trim_start();
+        t == "*" || t.starts_with("* ")
+    });
+    let common_indent = text_lines()
+        .map(|line| line.len() - line.trim_start_matches([' ', '\t']).len())
+        .min()
+        .unwrap_or(0);
+
+    body.iter()
+        .map(|&line| {
+            if line.trim().is_empty() || line.contains("/*") || line.contains("*/") {
+                return None;
+            }
+            if asterisk {
+                let t = line.trim_start();
+                let rest = &t[1..];
+                Some(CommentLine {
+                    indent: line[..line.len() - t.len()].to_string(),
+                    marker: "*".to_string(),
+                    text: rest.strip_prefix(' ').unwrap_or(rest).to_string(),
+                })
+            } else {
+                Some(CommentLine {
+                    indent: line[..common_indent].to_string(),
+                    marker: String::new(),
+                    text: line[common_indent..].to_string(),
+                })
+            }
+        })
+        .collect()
+}
+
+/// Parses every line into a [`CommentLine`], or `None` if the line is passed through unchanged.
+///
+/// A block comment that starts a line is followed to its end (block comments nest), so line comment markers inside it are not
+/// taken for comments. Only the body of a multi-line block doc comment is parsed; its opening and closing lines, and all other
+/// block comments, are passed through.
+fn parse_lines(lines: &[&str]) -> Vec<Option<CommentLine>> {
+    let mut parsed = Vec::with_capacity(lines.len());
+    let mut i = 0;
+    while i < lines.len() {
+        let trimmed = lines[i].trim_start();
+        if !trimmed.starts_with("/*") {
+            parsed.push(parse_comment_line(lines[i]));
+            i += 1;
+            continue;
+        }
+        let mut depth = block_comment_depth(trimmed, 0);
+        let mut end = i;
+        while depth > 0 && end + 1 < lines.len() {
+            end += 1;
+            depth = block_comment_depth(lines[end], depth);
+        }
+        parsed.push(None);
+        if end > i {
+            let body = &lines[i + 1..end];
+            if depth == 0 && is_block_doc_opener(trimmed) {
+                parsed.extend(parse_block_doc_body(body));
+            } else {
+                parsed.extend(body.iter().map(|_| None));
+            }
+            parsed.push(None);
+        }
+        i = end + 1;
+    }
+    parsed
 }
 
 /// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
@@ -328,18 +438,19 @@ fn print_changes(changes: &[Change], header: Option<&str>) {
 /// Processes an entire file's content, combining and wrapping comments.
 ///
 /// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
-/// (`` ``` ``) are passed through unchanged.
+/// (`` ``` ``) are passed through unchanged, as are lines that [`parse_lines`] does not parse.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
+    let parsed = parse_lines(&lines);
     let mut result: Vec<String> = Vec::new();
     let mut changes: Vec<Change> = Vec::new();
     let mut i = 0;
     let mut in_code_block = false;
 
     while i < lines.len() {
-        let comment = parse_comment_line(lines[i]);
+        let comment = parsed[i].as_ref();
 
-        if let Some(ref c) = comment
+        if let Some(c) = comment
             && c.text.trim_start().starts_with("```")
         {
             in_code_block = !in_code_block;
@@ -360,13 +471,13 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
 
         let mut j = i + 1;
         while j < lines.len() {
-            if let Some(next_comment) = parse_comment_line(lines[j]) {
+            if let Some(next_comment) = &parsed[j] {
                 let current = CommentLine {
                     indent: comment.indent.clone(),
                     marker: comment.marker.clone(),
                     text: combined_text.clone(),
                 };
-                if can_combine(&current, &next_comment) {
+                if can_combine(&current, next_comment) {
                     combined_text.push(' ');
                     combined_text.push_str(next_comment.text.trim_start());
                     orig_lines.push(lines[j].to_string());
@@ -378,7 +489,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         }
 
         let base = format!("{}{}", comment.indent, comment.marker);
-        let prefix = if combined_text.is_empty() {
+        let prefix = if combined_text.is_empty() || comment.marker.is_empty() {
             base.clone()
         } else {
             format!("{base} ")
@@ -942,6 +1053,77 @@ mod tests {
         let (output, changes) = process_content(input, 100);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_block_doc_asterisk_style() {
+        let input = "/**\n * aaa bbb\n * ccc ddd eee\n *\n * fff\n */\n";
+        let (output, _) = process_content(input, 16);
+        assert_eq!(output, "/**\n * aaa bbb ccc\n * ddd eee\n *\n * fff\n */\n");
+        let (again, changes) = process_content(&output, 16);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_block_doc_no_asterisk_style() {
+        let input = "    /*!\n    aaa bbb\n    ccc ddd eee\n\n      - fff ggg hhh\n    */\n";
+        let (output, _) = process_content(input, 18);
+        assert_eq!(
+            output,
+            "    /*!\n    aaa bbb ccc\n    ddd eee\n\n      - fff ggg\n        hhh\n    */\n"
+        );
+    }
+
+    #[test]
+    fn test_block_doc_one_line_unchanged() {
+        let input = "/** a one-line block doc comment that is longer than the width */\n";
+        let (output, changes) = process_content(input, 20);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_block_doc_nested_comment() {
+        let input = "/**\n * aaa\n * /* nested */ bbb\n * ccc\n * ddd\n */\n// eee\n// fff\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "/**\n * aaa\n * /* nested */ bbb\n * ccc ddd\n */\n// eee fff\n");
+    }
+
+    #[test]
+    fn test_block_doc_code_fence() {
+        let input = "/**\n * ```\n * let a = 1;\n * let b = 2;\n * ```\n */\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_plain_block_comment_unchanged() {
+        let input = "/*\n * aaa bbb ccc ddd eee fff\n * ggg\n// hhh iii jjj kkk\n// lll\n/* /* */ */\n*/\n";
+        let (output, changes) = process_content(input, 12);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_plain_block_variants_not_doc() {
+        assert!(is_block_doc_opener("/**"));
+        assert!(is_block_doc_opener("/*!  "));
+        assert!(!is_block_doc_opener("/***"));
+        assert!(!is_block_doc_opener("/**/"));
+        assert!(!is_block_doc_opener("/*"));
+        assert!(!is_block_doc_opener("/** text"));
+    }
+
+    #[test]
+    fn test_block_comment_depth() {
+        assert_eq!(block_comment_depth("/*", 0), 1);
+        assert_eq!(block_comment_depth("/* /* */", 0), 1);
+        assert_eq!(block_comment_depth("/* */ code /*", 0), 0);
+        assert_eq!(block_comment_depth("/**/", 0), 0);
+        assert_eq!(block_comment_depth(" */ */", 2), 0);
+        assert_eq!(block_comment_depth("text", 1), 1);
     }
 
     /// Creates `project/src`, `home`, and `config/rustfmt` under a temporary root.
