@@ -566,7 +566,7 @@ pub mod checksum {
 
     This inner block doc comment has no leading asterisks, which is the other common way to write a block comment, and it is indented to match the surrounding code.
 
-    Block comments are not line comments, so a tool that handles only `//`, `///`, and `//!` should leave this text exactly as it is, no matter how long its lines are.
+    Rustdoc strips the common indentation of these lines, so a tool that wraps block doc comments should use that indentation as the prefix of every line it writes, the same way it uses `//!` for an inner line doc comment.
     */
 
     /// Computes the [Fletcher-16] checksum of `bytes`.
@@ -665,7 +665,9 @@ const KNOWN_CHECKSUMS: [(&[u8], u16); 3] = [
 /* A plain block comment on one line. */
 
 /*
- * A plain multi-line block comment with leading asterisks. Block comments are not processed by the tool, so this line should remain longer than the configured width.
+ * A plain multi-line block comment with leading asterisks. Only block doc comments are processed by the tool, so this line should remain longer than the configured width.
+// A line comment inside a block comment is part of the block comment, so it must not be wrapped or combined with the line below it.
+// This is the line below it.
  * /* Rust allows block comments to nest, unlike C, so this inner comment does not end the outer one. */
  */
 

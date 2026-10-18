@@ -10,7 +10,10 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 - Wraps long comments to a configurable width (default: 100 columns), measured in display columns as rustfmt measures it
 - Reads `max_width` from the rustfmt config file, located exactly as rustfmt locates it, if `--max-width` is not specified
 - Combines consecutive comment lines before wrapping
-- Supports Rust comment styles: `//`, `///`, `//!`
+- Supports Rust comment styles: `//`, `///`, `//!`, and block doc comments (`/** */`, `/*! */`)
+- Block doc comments are wrapped using the leading ` * ` of their lines, or their common indentation if the lines have no leading
+  asterisks, as the line prefix. Their opening and closing lines, one-line block doc comments, and plain block comments
+  (`/* */`) are left unchanged.
 - Preserves indentation, comment markers, and blank comment lines
 - Respects hierarchical markers (`#`, `*`, `-`, `+`, `1.`, `1)`, `A.`, `a)`, `ii.`), back-tick quoted text, and code blocks
 - Glob pattern support for processing multiple files
@@ -80,7 +83,7 @@ cargo wrap-comments < src/main.rs
 
 Consecutive comment lines are combined before wrapping when ALL of these are true:
 
-1. Same comment marker (`//`, `///`, or `//!`)
+1. Same comment marker (`//`, `///`, `//!`, or the ` * ` prefix in a block doc comment)
 2. Same indentation level
 3. Same block quote depth (the number of leading `>`). The rules below apply to the text after the `>` prefix, and the prefix is repeated on every wrapped line.
 4. Neither line is blank
