@@ -92,7 +92,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 10. The current line does not end with a markdown hard line break (a backslash, or two or more spaces). Wrapping keeps the break at the end of the last output line, and never moves a backslash to the end of a line.
 11. Neither line is a markdown table row (starts with `|`). Table rows are never wrapped, even when wider than the line width.
 
-Lines between code fences are passed through unchanged. A code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence.
+Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` `` or `~~~`) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation. A fenced code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence.
 
 ## Width Resolution
 
