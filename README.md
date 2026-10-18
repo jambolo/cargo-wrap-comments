@@ -99,7 +99,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 12. Neither line starts with an SPDX tag (e.g. `SPDX-License-Identifier:`). SPDX lines are also never wrapped.
 13. The next line does not start with an annotation tag (`TODO`, `FIXME`, `NOTE`, `HACK`, `XXX` or `SAFETY`, optionally followed by `(...)`, then `:`). Lines after a tagged line may still be combined into it.
 
-Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` `` or `~~~`) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation. A fenced code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence.
+Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` `` or `~~~`) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation. A fenced code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence. Inside a block quote, code blocks are found in the text after the `>` prefix, a fenced code block is closed only by a fence at the same quote depth, and a line with fewer `>` ends the code block.
 
 ## Width Resolution
 
