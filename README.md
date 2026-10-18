@@ -89,6 +89,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 7. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
 8. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
 9. The current line does not end with a markdown hard line break (a backslash, or two or more spaces). Wrapping keeps the break at the end of the last output line, and never moves a backslash to the end of a line.
+10. Neither line is a markdown table row (starts with `|`). Table rows are never wrapped, even when wider than the line width.
 
 Lines between code fences are passed through unchanged. A code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence.
 

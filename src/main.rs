@@ -219,6 +219,11 @@ fn is_thematic_break(text: &str) -> bool {
     body.chars().all(|c| c == first || c == ' ' || c == '\t') && body.chars().filter(|&c| c == first).count() >= 3
 }
 
+/// Returns `true` if `text` is a markdown table row (its trimmed text starts with `|`).
+fn is_table_row(text: &str) -> bool {
+    text.trim_start().starts_with('|')
+}
+
 /// Returns `true` if `text` ends with an unescaped backslash, which is a markdown hard line break at the end of a line.
 fn ends_with_backslash_break(text: &str) -> bool {
     text.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1
@@ -237,10 +242,10 @@ fn trailing_space_break(text: &str) -> &str {
 
 /// Determines whether two adjacent comment lines should be combined.
 ///
-/// Lines are combined when they share the same marker and indentation, neither is blank, a divider, or a thematic break, the next
-/// line doesn't start with a hierarchical marker, the current line doesn't start with or contain a code fence or end with a hard
-/// line break (a backslash or two or more spaces), and a markdown heading line (starting with `#`) is not combined with the text
-/// that follows.
+/// Lines are combined when they share the same marker and indentation, neither is blank, a divider, a thematic break, or a table
+/// row, the next line doesn't start with a hierarchical marker, the current line doesn't start with or contain a code fence or end
+/// with a hard line break (a backslash or two or more spaces), and a markdown heading line (starting with `#`) is not combined with
+/// the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
@@ -252,6 +257,8 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !is_divider(&next.text)
         && !is_thematic_break(&current.text)
         && !is_thematic_break(&next.text)
+        && !is_table_row(&current.text)
+        && !is_table_row(&next.text)
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
         && code_fence(&current.text).is_none()
@@ -396,7 +403,8 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
             }
         }
 
-        let passthrough = comment.is_none() || open_fence.is_some();
+        // Table rows are never combined or wrapped, even when wider than `max_width`.
+        let passthrough = open_fence.is_some() || comment.as_ref().is_none_or(|c| is_table_row(&c.text));
         if passthrough {
             result.push(lines[i].to_string());
             i += 1;
@@ -936,6 +944,48 @@ mod tests {
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_is_table_row() {
+        assert!(is_table_row("| a | b |"));
+        assert!(is_table_row("  | --- | :---: |"));
+        assert!(is_table_row("|"));
+        assert!(!is_table_row("a | b"));
+        assert!(!is_table_row(""));
+    }
+
+    #[test]
+    fn test_table_rows_pass_through() {
+        let input = "\
+/// Types that can be emptied in a single call.
+///
+/// | Implementor       | Order            | Notes                                                                                                         |
+/// | ----------------- | ---------------- | ------------------------------------------------------------------------------------------------------------- |
+/// | [`RingBuffer<T>`] | oldest to newest | The only implementor in this file. The table row is longer than the configured width and must not be wrapped. |
+pub trait Drain {
+";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_table_with_surrounding_text() {
+        let input = "// text before\n// | a | b |\n// | - | - |\n// text after\n// more\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// text before\n// | a | b |\n// | - | - |\n// text after more\n");
+    }
+
+    #[test]
+    fn test_table_rows_with_hard_breaks_and_tilde_fences() {
+        // Table rows keep trailing backslashes and spaces, and a table inside a tilde fence doesn't end the code block.
+        let input = "// text\\\n// | a | b |  \n// | - | - |\\\n// ~~~\n// | c | d |\n// one\n// two\n// ~~~\n// three\n// four\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// text\\\n// | a | b |  \n// | - | - |\\\n// ~~~\n// | c | d |\n// one\n// two\n// ~~~\n// three four\n"
+        );
     }
 
     #[test]
