@@ -391,9 +391,14 @@ fn starts_with_annotation_tag(text: &str) -> bool {
 ///
 /// Returns the prefix, the quote depth (the number of `>`), and the text after the prefix.
 fn split_quote(text: &str) -> (&str, usize, &str) {
+    split_quote_levels(text, usize::MAX)
+}
+
+/// Like [`split_quote`], but splits off at most `max_depth` levels of `>`.
+fn split_quote_levels(text: &str, max_depth: usize) -> (&str, usize, &str) {
     let mut depth = 0;
     let mut end = 0;
-    loop {
+    while depth < max_depth {
         let rest = &text[end..];
         let unindented = rest.trim_start_matches(' ');
         if rest.len() - unindented.len() > 3 {
@@ -604,8 +609,8 @@ fn list_content_column(text: &str) -> Option<usize> {
 /// Processes an entire file's content, combining and wrapping comments.
 ///
 /// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
-/// (`` ``` `` or `~~~` fences, or CommonMark indented code blocks) are passed through unchanged, as are lines that
-/// [`parse_lines`] does not parse.
+/// (`` ``` `` or `~~~` fences, or CommonMark indented code blocks), including code blocks inside block quotes, are passed through
+/// unchanged, as are lines that [`parse_lines`] does not parse.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
     let parsed = parse_lines(&lines);
@@ -615,11 +620,16 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     // The opening fence of the code block being passed through, if any.
     let mut open_fence: Option<(char, usize)> = None;
     let mut in_indented_code = false;
-    // The indent and marker of the previous line if it is a comment, and whether its text is blank.
-    let mut prev: Option<(String, String, bool)> = None;
-    // Where the content of the most recent list item in the comment block starts. Indented code inside the item is indented 4
-    // columns past it.
-    let mut list_column: Option<usize> = None;
+    // The block quote depth of the code block being passed through, and, for an indented code block, the indentation its lines
+    // need after the quote prefix.
+    let mut code_depth = 0;
+    let mut code_indent = 0;
+    // The indent, marker, and block quote depth of the previous line if it is a comment, and whether its text after the quote
+    // prefix is blank.
+    let mut prev: Option<(String, String, usize, bool)> = None;
+    // The block quote depth of the most recent list item in the comment block, and the column where its content starts. Indented
+    // code inside the item is indented 4 columns past it.
+    let mut list_item: Option<(usize, usize)> = None;
 
     while i < lines.len() {
         let comment = parsed[i].as_ref();
@@ -627,34 +637,56 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         if let Some(c) = comment {
             let same_block = prev
                 .as_ref()
-                .is_some_and(|(indent, marker, _)| *indent == c.indent && *marker == c.marker);
+                .is_some_and(|(indent, marker, _, _)| *indent == c.indent && *marker == c.marker);
             if !same_block {
-                list_column = None;
+                list_item = None;
             }
-            let blank = c.text.trim().is_empty();
-            let indent = leading_indent(&c.text);
-            let code_indent = list_column.unwrap_or(0) + 4;
-            if in_indented_code && (!same_block || (!blank && indent < code_indent)) {
+            let (_, depth, body) = split_quote(&c.text);
+            // A code block inside a block quote continues only on lines that keep the quote's prefix, and the text after that
+            // prefix is the code.
+            let (_, kept_depth, code_text) = split_quote_levels(&c.text, code_depth);
+            let code_blank = code_text.trim().is_empty();
+            if kept_depth < code_depth {
+                open_fence = None;
                 in_indented_code = false;
             }
-            // An indented code block cannot interrupt a paragraph, so it starts only after a blank line or at the block start.
-            let prev_blank = prev.as_ref().is_none_or(|(_, _, blank)| *blank);
-            if open_fence.is_none() && !blank && indent >= code_indent && (!same_block || prev_blank) {
-                in_indented_code = true;
+            if in_indented_code && (!same_block || (!code_blank && leading_indent(code_text) < code_indent)) {
+                in_indented_code = false;
             }
-            prev = Some((c.indent.clone(), c.marker.clone(), blank));
+            // An indented code block cannot interrupt a paragraph, so it starts only after a blank line, at the start of a block
+            // quote, or at the block start.
+            let blank = body.trim().is_empty();
+            let indent_needed = list_item.filter(|&(d, _)| d == depth).map_or(0, |(_, column)| column) + 4;
+            let prev_blank = prev
+                .as_ref()
+                .is_none_or(|(_, _, prev_depth, prev_blank)| *prev_blank || *prev_depth < depth);
+            if open_fence.is_none()
+                && !in_indented_code
+                && !blank
+                && leading_indent(body) >= indent_needed
+                && (!same_block || prev_blank)
+            {
+                in_indented_code = true;
+                code_depth = depth;
+                code_indent = indent_needed;
+            }
+            prev = Some((c.indent.clone(), c.marker.clone(), depth, blank));
 
             if in_indented_code {
-                if !blank {
+                // A line that starts the block is not blank, so `code_blank` is accurate here.
+                if !code_blank {
                     result.push(lines[i].to_string());
                     i += 1;
                     continue;
                 }
             } else {
                 match open_fence {
-                    Some(open) if closes_code_fence(&c.text, open) => open_fence = None,
+                    Some(open) if closes_code_fence(code_text, open) => open_fence = None,
                     Some(_) => {}
-                    None => open_fence = code_fence(&c.text),
+                    None => {
+                        open_fence = code_fence(body);
+                        code_depth = depth;
+                    }
                 }
             }
         } else {
@@ -675,10 +707,14 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         }
 
         let comment = comment.unwrap();
-        if let Some(column) = list_content_column(&comment.text) {
-            list_column = Some(column);
-        } else if list_column.is_some_and(|column| !comment.text.trim().is_empty() && leading_indent(&comment.text) < column) {
-            list_column = None;
+        let (_, depth, body) = split_quote(&comment.text);
+        if let Some(column) = list_content_column(body) {
+            list_item = Some((depth, column));
+        } else if list_item.is_some_and(|(list_depth, column)| {
+            let (_, kept_depth, rest) = split_quote_levels(&comment.text, list_depth);
+            kept_depth < list_depth || (!rest.trim().is_empty() && leading_indent(rest) < column)
+        }) {
+            list_item = None;
         }
 
         let mut combined_text = comment.text.clone();
@@ -1521,6 +1557,82 @@ mod tests {
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_code_blocks_in_quote_pass_through() {
+        let input = "/// > Example:\n/// >\n/// > ~~~\n/// > let buffer = RingBuffer::with_capacity(3).unwrap();\n/// > buffer.push(\"x\").unwrap();\n/// > ~~~\nfn fenced() {}\n\n/// > Example:\n/// >\n/// >     let buffer = RingBuffer::with_capacity(3).unwrap();\n/// >     buffer.push(\"x\").unwrap();\nfn indented() {}\n";
+        for width in [100, 40] {
+            let (output, changes) = process_content(input, width);
+            assert_eq!(output, input);
+            assert!(changes.is_empty());
+        }
+    }
+
+    #[test]
+    fn test_code_block_in_quote_ends_at_lower_quote_depth() {
+        let input = "// > ```\n// > code\n// text\n// more\n// > > ~~~\n// > > code\n// > text\n// > more\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "// > ```\n// > code\n// text more\n// > > ~~~\n// > > code\n// > text more\n"
+        );
+        let input = "// >     code a\n// >     code b\n// text\n// more\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "// >     code a\n// >     code b\n// text more\n");
+    }
+
+    #[test]
+    fn test_fence_in_quote_closed_only_at_same_depth() {
+        // Deeper quote lines are code, so a fence after a deeper prefix doesn't close the block.
+        let input = "// > ~~~\n// > > a\n// > > b\n// > > ~~~\n// > c\n// > d\n// > ~~~\n// > e\n// > f\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "// > ~~~\n// > > a\n// > > b\n// > > ~~~\n// > c\n// > d\n// > ~~~\n// > e f\n"
+        );
+        // Quote markers inside a fence that is not quoted are code.
+        let input = "// ```\n// > a\n// > b\n// ```\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_code_in_quote_starts_only_after_blank_or_at_quote_start() {
+        let input = "/// Example:\n/// >     code a\n/// >     code b\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+        let (output, _) = process_content("/// > text\n/// >     more\n", 100);
+        assert_eq!(output, "/// > text more\n");
+    }
+
+    #[test]
+    fn test_indented_code_in_quoted_numbered_and_letter_items() {
+        // Inside a quoted `10)` item, content starts at column 4, so code needs 8 columns after the prefix.
+        let input = "// > 10) item\n// >\n// >     nested\n// >     paragraph\n// >\n// >         code a\n// >         code b\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "// > 10) item\n// >\n// >     nested paragraph\n// >\n// >         code a\n// >         code b\n"
+        );
+        // `a.` is not a list marker, so 4 columns after the prefix is already code.
+        let input = "// > a. text\n// >\n// >     code a\n// >     code b\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_code_in_quoted_list_item() {
+        let input =
+            "// > - item\n// >\n// >     nested paragraph\n// >     continued\n// >\n// >       code a\n// >       code b\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "// > - item\n// >\n// >     nested paragraph continued\n// >\n// >       code a\n// >       code b\n"
+        );
     }
 
     #[test]
