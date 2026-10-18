@@ -846,4 +846,4 @@ fn deeply_nested_comments() {
 // --- a
 // -*-
 //
-// None of the four lines above is a thematic break, but each one starts with `-`, so it starts a new paragraph.
+// None of the four lines above is a thematic break or a list element, so they should be joined.
