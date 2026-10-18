@@ -7,7 +7,7 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 
 ## Features
 
-- Wraps long comments to a configurable width (default: 100 characters)
+- Wraps long comments to a configurable width (default: 100 columns), measured in display columns as rustfmt measures it
 - Reads `max_width` from the rustfmt config file, located exactly as rustfmt locates it, if `--max-width` is not specified
 - Combines consecutive comment lines before wrapping
 - Supports Rust comment styles: `//`, `///`, `//!`

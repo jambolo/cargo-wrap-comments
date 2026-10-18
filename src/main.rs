@@ -43,6 +43,7 @@ use std::fs;
 use std::io::{self, Read as _};
 use std::path::{Path, PathBuf};
 use std::process;
+use unicode_width::UnicodeWidthStr;
 
 #[derive(Parser)]
 #[command(name = "cargo", bin_name = "cargo")]
@@ -507,11 +508,11 @@ fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usi
 
     for word in &words {
         let pfx = if lines.is_empty() { prefix } else { continuation_prefix };
-        let available = max_width.saturating_sub(pfx.len()).max(1);
+        let available = max_width.saturating_sub(pfx.width()).max(1);
 
         if current_line.is_empty() {
             current_line.push_str(word);
-        } else if current_line.len() + 1 + word.len() <= available {
+        } else if current_line.width() + 1 + word.width() <= available {
             current_line.push(' ');
             current_line.push_str(word);
         } else {
@@ -684,7 +685,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
 
         let mut new_lines = if text.is_empty() {
             vec![base.trim_end().to_string()]
-        } else if full_line.len() > max_width {
+        } else if full_line.width() > max_width {
             // A block quote prefix and leading spaces (e.g. a sub-list item) nest the text, so every wrapped line keeps them.
             let body = split_quote(text).2.trim_start();
             let first = format!("{prefix}{}", &text[..text.len() - body.len()]);
@@ -1689,6 +1690,45 @@ pub trait Drain {
     fn test_wrap_text() {
         let result = wrap_text("hello world foo bar baz", "// ", "// ", 15);
         assert_eq!(result, vec!["// hello world", "// foo bar baz"]);
+    }
+
+    #[test]
+    fn test_non_ascii_width_counts_columns() {
+        // 28 columns but 34 bytes: fits within 30 columns.
+        let input = "// naïve café résumé déjà vu\n";
+        let (output, changes) = process_content(input, 30);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wide_chars_count_two_columns() {
+        // Each CJK character is 2 columns wide: "// 日本語 テキスト" is 18 columns (34 bytes).
+        let input = "// 日本語 テキスト\n";
+        let (output, changes) = process_content(input, 18);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+        let (output, _) = process_content(input, 17);
+        assert_eq!(output, "// 日本語\n// テキスト\n");
+    }
+
+    #[test]
+    fn test_non_ascii_width_in_quote_list_and_hard_break() {
+        // "// > naïve café résumé déjà vu" is 30 columns but 35 bytes.
+        let input = "// > naïve café résumé déjà vu\n";
+        let (output, changes) = process_content(input, 30);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+
+        // "// - 日本語 テキスト" is 20 columns, and the continuation line keeps the 2-column hanging indent.
+        let (output, _) = process_content("// - 日本語 テキスト\n", 19);
+        assert_eq!(output, "// - 日本語\n//   テキスト\n");
+
+        // "// déjà vu là" is 13 columns but 16 bytes, so it fits in 14 columns and keeps its hard line break.
+        let input = "// déjà vu là  \n// next\n";
+        let (output, changes) = process_content(input, 14);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
     }
 
     #[test]
