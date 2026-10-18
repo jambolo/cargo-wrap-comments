@@ -88,6 +88,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 6. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
 7. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
 8. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
+9. The current line does not end with a markdown hard line break (a backslash, or two or more spaces). Wrapping keeps the break at the end of the last output line, and never moves a backslash to the end of a line.
 
 ## Width Resolution
 
