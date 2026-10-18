@@ -20,7 +20,7 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 - Preserves indentation, comment markers, the spacing after the marker, and blank comment lines
 - Leaves lines that are not combined or wrapped exactly as they are, except that trailing whitespace is removed from blank comment
   lines
-- Respects hierarchical markers (`#`, `*`, `-`, `+`, `1.`, `1)`, `A.`, `a)`, `ii.`), back-tick quoted text, and code blocks
+- Respects hierarchical markers (`#`, `*`, `-`, `+`, `1.`, `1)`), back-tick quoted text, and code blocks
 - Glob pattern support for processing multiple files
 - Stdin/stdout mode when no files are specified
 - Check mode for previewing changes without modifying files
@@ -92,7 +92,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 2. Same indentation level
 3. Same block quote depth (the number of leading `>`). The rules below apply to the text after the `>` prefix, and the prefix is repeated on every wrapped line.
 4. Neither line is blank
-5. The next line does not start with a hierarchical marker: a heading (`#`), a code fence (`` ``` `` or `~~~`), a list marker (`*`, `-`, `1.`, `A.`, `a.`) followed by a space, a tab, or the end of the line, or one of these followed by a space: `+`, `1)`, `a)`, a Roman numeral followed by `.` or `)` (e.g. `ii.`, `XII)`). As in CommonMark, an ordered list marker whose label is not `1`, `A`, `a`, `I`, or `i` (e.g. `2026.`, `2)`, `ii.`) starts a new item only when the current line is itself a list item; otherwise the line continues the paragraph.
+5. The next line does not start with a hierarchical marker: a heading (`#`), a code fence (`` ``` `` or `~~~`), a bullet (`*` or `-`) or an ordered list marker (1 to 9 digits followed by `.` or `)`, e.g. `1.`, `10)`) followed by a space, a tab, or the end of the line, or `+` followed by a space. As in CommonMark, letters and Roman numerals (e.g. `A.`, `a)`, `ii.`) are not list markers, and an ordered list marker whose number is not 1 (e.g. `2026.`, `2)`) starts a new item only when the current line is itself a list item; otherwise the line continues the paragraph.
 6. The current line does not start with a code fence (`` ``` `` or `~~~`) or contain `` ``` ``
 7. The current line is not a markdown heading (1 to 6 `#` characters followed by a space, a tab, or the end of the line, so `#42` and `#hashtag` are not headings). Headings are not combined with the text that follows.
 8. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
@@ -102,7 +102,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 12. Neither line starts with an SPDX tag (e.g. `SPDX-License-Identifier:`). SPDX lines are also never wrapped.
 13. The next line does not start with an annotation tag (`TODO`, `FIXME`, `NOTE`, `HACK`, `XXX` or `SAFETY`, optionally followed by `(...)`, then `:`). Lines after a tagged line may still be combined into it.
 
-Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` `` or `~~~`) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation. A fenced code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence.
+Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` `` or `~~~`) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation. A fenced code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence. Inside a block quote, code blocks are found in the text after the `>` prefix, a fenced code block is closed only by a fence at the same quote depth, and a line with fewer `>` ends the code block.
 
 ## Width Resolution
 

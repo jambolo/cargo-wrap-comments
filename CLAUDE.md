@@ -11,8 +11,6 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - Continuation lines after hierarchical markers get extra indent matching the marker width:
   - `-` (space) or `*` (space) → 2 chars
   - `+` (space) → 2 chars
-  - `X.` (space, single letter) → 3 chars
-  - `X)` (space, single letter) or `N)` (space, digits) → label length + 2 chars
-  - Roman numeral followed by `.` or `)` (space, e.g. `ii.`, `XII)`) → numeral length + 2 chars
-  - `N.` (space, multi-digit number like `10.`) → digit count + 2 chars
+  - `N.` or `N)` (space, 1 to 9 digits like `1.` or `10)`) → digit count + 2 chars
+  - Letters and Roman numerals (`A.`, `a)`, `ii.`) are not markers, as in CommonMark
   - `#` (space, headings) → hash count + 1 chars
