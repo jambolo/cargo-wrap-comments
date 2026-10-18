@@ -137,10 +137,14 @@ fn closes_code_fence(text: &str, open: (char, usize)) -> bool {
 /// indented).
 ///
 /// Recognized markers: `#`, `*`, `-`, a code fence (`` ``` `` or `~~~`), a single letter followed by `.` (e.g. `A.`, `a.`),
-/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
+/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`), plus the markers recognized by
+/// [`spaced_list_marker_width`].
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     let text = text.trim_start();
-    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || code_fence(text).is_some() {
+    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-'))
+        || code_fence(text).is_some()
+        || spaced_list_marker_width(text) > 0
+    {
         return true;
     }
     let mut chars = text.chars();
@@ -192,7 +196,75 @@ fn hierarchical_marker_width(text: &str) -> usize {
             }
         }
     }
+    spaced_list_marker_width(text)
+}
+
+/// Returns the width of a list marker that is recognized only when followed by a space: `+ ` → 2, digits or a single letter
+/// followed by `)` (e.g. `1) ` → 3, `a) ` → 3), or a Roman numeral followed by `.` or `)` (e.g. `ii. ` → 4, `XII) ` → 5).
+///
+/// Returns 0 if the text does not start with one of these markers.
+fn spaced_list_marker_width(text: &str) -> usize {
+    if text.starts_with("+ ") {
+        return 2;
+    }
+    let label_len = text.bytes().take_while(u8::is_ascii_alphanumeric).count();
+    let (label, rest) = text.split_at(label_len);
+    let followed_by = |delimiter: u8| rest.as_bytes().first() == Some(&delimiter) && rest.as_bytes().get(1) == Some(&b' ');
+    let is_number = label_len > 0 && label.bytes().all(|b| b.is_ascii_digit());
+    let is_letter = label_len == 1 && label.as_bytes()[0].is_ascii_alphabetic();
+    if ((is_number || is_letter) && followed_by(b')')) || (is_roman(label) && (followed_by(b'.') || followed_by(b')'))) {
+        return label_len + 2;
+    }
     0
+}
+
+/// Returns `true` if `s` is a Roman numeral in canonical form (e.g. `iv`, `XII`), written entirely in uppercase or entirely in
+/// lowercase. Non-canonical forms such as `iiii` or `ic` are rejected, which keeps words like `did` or `mid` from matching.
+fn is_roman(s: &str) -> bool {
+    const NUMERALS: [(isize, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    if s.is_empty() || !(s.bytes().all(|b| b.is_ascii_uppercase()) || s.bytes().all(|b| b.is_ascii_lowercase())) {
+        return false;
+    }
+    let upper = s.to_ascii_uppercase();
+    let digit = |c: char| {
+        NUMERALS
+            .iter()
+            .find(|(_, n)| n.len() == 1 && n.starts_with(c))
+            .map(|&(v, _)| v)
+    };
+    let Some(values) = upper.chars().map(digit).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    let mut value = 0;
+    for (i, &v) in values.iter().enumerate() {
+        if values.get(i + 1).is_some_and(|&next| next > v) {
+            value -= v;
+        } else {
+            value += v;
+        }
+    }
+    let mut canonical = String::new();
+    for (v, numeral) in NUMERALS {
+        while value >= v {
+            canonical.push_str(numeral);
+            value -= v;
+        }
+    }
+    canonical == upper
 }
 
 /// Returns `true` if `text` is a divider: four or more repetitions of a single punctuation character (e.g. `----`, `=====`,
@@ -1556,6 +1628,83 @@ pub trait Drain {
         assert_eq!(hierarchical_marker_width("```code"), 0);
         assert_eq!(hierarchical_marker_width("10. item"), 4);
         assert_eq!(hierarchical_marker_width("100. item"), 5);
+    }
+
+    #[test]
+    fn test_is_roman() {
+        for s in ["i", "ii", "iv", "ix", "xii", "XII", "MCMXCIX", "civ"] {
+            assert!(is_roman(s), "{s}");
+        }
+        for s in ["", "iiii", "ic", "Ii", "etc", "eg", "did", "mid", "vx"] {
+            assert!(!is_roman(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn test_spaced_list_markers() {
+        assert!(starts_with_hierarchical_marker("+ plus"));
+        assert!(starts_with_hierarchical_marker("1) first"));
+        assert!(starts_with_hierarchical_marker("10) tenth"));
+        assert!(starts_with_hierarchical_marker("a) letter"));
+        assert!(starts_with_hierarchical_marker("ii. second"));
+        assert!(starts_with_hierarchical_marker("iv) fourth"));
+        assert!(starts_with_hierarchical_marker("XII. twelfth"));
+        assert!(!starts_with_hierarchical_marker("+1 is positive"));
+        assert!(!starts_with_hierarchical_marker("1)no space"));
+        assert!(!starts_with_hierarchical_marker("etc. and so on"));
+        assert!(!starts_with_hierarchical_marker("ab) not a marker"));
+        assert!(!starts_with_hierarchical_marker("iiii. not canonical"));
+        assert_eq!(hierarchical_marker_width("+ plus"), 2);
+        assert_eq!(hierarchical_marker_width("1) first"), 3);
+        assert_eq!(hierarchical_marker_width("10) tenth"), 4);
+        assert_eq!(hierarchical_marker_width("a) letter"), 3);
+        assert_eq!(hierarchical_marker_width("ii. second"), 4);
+        assert_eq!(hierarchical_marker_width("XII) twelfth"), 5);
+        assert_eq!(hierarchical_marker_width("etc. and so on"), 0);
+    }
+
+    #[test]
+    fn test_no_combine_spaced_list_markers() {
+        let input = "// I. Roman numerals are sometimes used for lists.\n// ii. Second roman item.\n// + Plus signs are valid CommonMark bullets too.\n// + Second plus-sign bullet.\n// 1) Parenthesized ordered list markers are also valid CommonMark.\n// 2) Second item.\n";
+        let (output, changes) = process_content(input, 80);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_spaced_list_markers_with_indent() {
+        let input = "// ii. A roman item that is long enough to wrap\n// 12) A numbered item that is long enough to wrap\n// + A plus item that is long enough to wrap\n";
+        let (output, _) = process_content(input, 32);
+        assert_eq!(
+            output,
+            "// ii. A roman item that is long\n//     enough to wrap\n// 12) A numbered item that is\n//     long enough to wrap\n// + A plus item that is long\n//   enough to wrap\n"
+        );
+    }
+
+    #[test]
+    fn test_spaced_list_markers_in_quote() {
+        let input = "// > + one\n// > + two\n// > 1) three\n// > iv. four\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+        let (output, _) = process_content("// > ii. aaa bbb ccc ddd\n", 20);
+        assert_eq!(output, "// > ii. aaa bbb ccc\n// >     ddd\n");
+    }
+
+    #[test]
+    fn test_indented_code_block_in_spaced_list_item() {
+        // Inside a `ii.` item, content starts at column 4, so code is indented 8 columns.
+        let input = "/// ii. item\n///\n///     nested paragraph\n///     continued\n///\n///         code a\n///         code b\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "/// ii. item\n///\n///     nested paragraph continued\n///\n///         code a\n///         code b\n"
+        );
+        // A `+` item's content starts at column 2, so a line indented 6 columns is code.
+        let input = "/// + item\n///\n///       code a\n///       code b\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
     }
 
     #[test]

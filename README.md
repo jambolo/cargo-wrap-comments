@@ -12,7 +12,7 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 - Combines consecutive comment lines before wrapping
 - Supports Rust comment styles: `//`, `///`, `//!`
 - Preserves indentation, comment markers, and blank comment lines
-- Respects hierarchical markers (`#`, `*`, `-`, `1.`, `A.`, `a.`), back-tick quoted text, and code blocks
+- Respects hierarchical markers (`#`, `*`, `-`, `+`, `1.`, `1)`, `A.`, `a)`, `ii.`), back-tick quoted text, and code blocks
 - Glob pattern support for processing multiple files
 - Stdin/stdout mode when no files are specified
 - Check mode for previewing changes without modifying files
@@ -84,7 +84,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 2. Same indentation level
 3. Same block quote depth (the number of leading `>`). The rules below apply to the text after the `>` prefix, and the prefix is repeated on every wrapped line.
 4. Neither line is blank
-5. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `~~~`, `1.`, `A.`, `a.`
+5. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `~~~`, `1.`, `A.`, `a.`, or one of these followed by a space: `+`, `1)`, `a)`, a Roman numeral followed by `.` or `)` (e.g. `ii.`, `XII)`)
 6. The current line does not start with a code fence (`` ``` `` or `~~~`) or contain `` ``` ``
 7. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
 8. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
