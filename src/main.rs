@@ -116,14 +116,31 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
     })
 }
 
+/// Returns the fence character and length if `text`, ignoring leading whitespace, starts with a code fence: three or more
+/// backticks or tildes (e.g. `` ``` ``, `~~~~`).
+fn code_fence(text: &str) -> Option<(char, usize)> {
+    let text = text.trim_start();
+    let first @ ('`' | '~') = text.chars().next()? else {
+        return None;
+    };
+    let len = text.chars().take_while(|&c| c == first).count();
+    (len >= 3).then_some((first, len))
+}
+
+/// Returns `true` if `text` closes a code block opened by `open`: a fence of the same character, at least as long, followed only
+/// by whitespace.
+fn closes_code_fence(text: &str, open: (char, usize)) -> bool {
+    code_fence(text).is_some_and(|(c, len)| c == open.0 && len >= open.1 && text.trim_start()[len..].trim().is_empty())
+}
+
 /// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
 /// indented).
 ///
-/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`, `a.`),
+/// Recognized markers: `#`, `*`, `-`, a code fence (`` ``` `` or `~~~`), a single letter followed by `.` (e.g. `A.`, `a.`),
 /// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     let text = text.trim_start();
-    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
+    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || code_fence(text).is_some() {
         return true;
     }
     let mut chars = text.chars();
@@ -207,16 +224,35 @@ fn is_table_row(text: &str) -> bool {
     text.trim_start().starts_with('|')
 }
 
+/// Returns `true` if `text` ends with an unescaped backslash, which is a markdown hard line break at the end of a line.
+fn ends_with_backslash_break(text: &str) -> bool {
+    text.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1
+}
+
+/// Returns the trailing spaces of `text` if there are two or more, which is a markdown hard line break at the end of a line.
+/// Otherwise, returns an empty string.
+fn trailing_space_break(text: &str) -> &str {
+    let trimmed = text.trim_end_matches(' ');
+    if text.len() - trimmed.len() >= 2 {
+        &text[trimmed.len()..]
+    } else {
+        ""
+    }
+}
+
 /// Determines whether two adjacent comment lines should be combined.
 ///
 /// Lines are combined when they share the same marker and indentation, neither is blank, a divider, a thematic break, or a table
-/// row, the next line doesn't start with a hierarchical marker, the current line doesn't contain a code fence, and a markdown
-/// heading line (starting with `#`) is not combined with the text that follows.
+/// row, the next line doesn't start with a hierarchical marker, the current line doesn't start with or contain a code fence or end
+/// with a hard line break (a backslash or two or more spaces), and a markdown heading line (starting with `#`) is not combined with
+/// the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     current.marker == next.marker
         && current.indent == next.indent
         && !current.text.is_empty()
         && !next.text.is_empty()
+        && !ends_with_backslash_break(&current.text)
+        && trailing_space_break(&current.text).is_empty()
         && !is_divider(&current.text)
         && !is_divider(&next.text)
         && !is_thematic_break(&current.text)
@@ -225,6 +261,7 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !is_table_row(&next.text)
         && !starts_with_hierarchical_marker(&next.text)
         && !current.text.contains("```")
+        && code_fence(&current.text).is_none()
         && !current.text.starts_with('#')
 }
 
@@ -283,9 +320,20 @@ fn tokenize_preserving_backticks(text: &str) -> Vec<String> {
 ///
 /// The first output line is prefixed with `prefix` (typically indent + marker + space). Continuation lines use
 /// `continuation_prefix`, which may include extra indentation to align with text after a hierarchical marker. Words that exceed the
-/// available width are emitted on their own line without truncation. Backtick-delimited spans are kept on the same line.
+/// available width are emitted on their own line without truncation. Backtick-delimited spans are kept on the same line, and a word
+/// ending in a backslash is kept on the same line as the word after it.
 fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usize) -> Vec<String> {
-    let words = tokenize_preserving_backticks(text);
+    let mut words: Vec<String> = Vec::new();
+    for token in tokenize_preserving_backticks(text) {
+        match words.last_mut() {
+            // A backslash at the end of an output line would be a hard line break that was not in the input.
+            Some(last) if ends_with_backslash_break(last) => {
+                last.push(' ');
+                last.push_str(&token);
+            }
+            _ => words.push(token),
+        }
+    }
     if words.is_empty() {
         return vec![prefix.trim_end().to_string()];
     }
@@ -335,25 +383,28 @@ fn print_changes(changes: &[Change], header: Option<&str>) {
 /// Processes an entire file's content, combining and wrapping comments.
 ///
 /// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
-/// (`` ``` ``) are passed through unchanged.
+/// (`` ``` `` or `~~~`) are passed through unchanged.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
     let mut result: Vec<String> = Vec::new();
     let mut changes: Vec<Change> = Vec::new();
     let mut i = 0;
-    let mut in_code_block = false;
+    // The opening fence of the code block being passed through, if any.
+    let mut open_fence: Option<(char, usize)> = None;
 
     while i < lines.len() {
         let comment = parse_comment_line(lines[i]);
 
-        if let Some(ref c) = comment
-            && c.text.trim_start().starts_with("```")
-        {
-            in_code_block = !in_code_block;
+        if let Some(ref c) = comment {
+            match open_fence {
+                Some(open) if closes_code_fence(&c.text, open) => open_fence = None,
+                Some(_) => {}
+                None => open_fence = code_fence(&c.text),
+            }
         }
 
         // Table rows are never combined or wrapped, even when wider than `max_width`.
-        let passthrough = in_code_block || comment.as_ref().is_none_or(|c| is_table_row(&c.text));
+        let passthrough = open_fence.is_some() || comment.as_ref().is_none_or(|c| is_table_row(&c.text));
         if passthrough {
             result.push(lines[i].to_string());
             i += 1;
@@ -385,25 +436,32 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
             break;
         }
 
-        let base = format!("{}{}", comment.indent, comment.marker);
-        let prefix = if combined_text.is_empty() {
-            base.clone()
+        // A hard line break made of trailing spaces is set aside so that trimming doesn't remove it, and is put back at the end.
+        let hard_break = if combined_text.trim().is_empty() {
+            ""
         } else {
-            format!("{base} ")
+            trailing_space_break(&combined_text)
         };
-        let full_line = format!("{prefix}{combined_text}");
+        let text = &combined_text[..combined_text.len() - hard_break.len()];
 
-        let new_lines = if combined_text.is_empty() {
+        let base = format!("{}{}", comment.indent, comment.marker);
+        let prefix = if text.is_empty() { base.clone() } else { format!("{base} ") };
+        let full_line = format!("{prefix}{text}");
+
+        let mut new_lines = if text.is_empty() {
             vec![base.trim_end().to_string()]
         } else if full_line.len() > max_width {
             // Leading spaces nest the text (e.g. a sub-list item), so every wrapped line keeps them.
-            let body = combined_text.trim_start();
-            let first = format!("{prefix}{}", &combined_text[..combined_text.len() - body.len()]);
+            let body = text.trim_start();
+            let first = format!("{prefix}{}", &text[..text.len() - body.len()]);
             let cont = format!("{first}{}", " ".repeat(hierarchical_marker_width(body)));
             wrap_text(body, &first, &cont, max_width)
         } else {
             vec![full_line.trim_end().to_string()]
         };
+        if let Some(last) = new_lines.last_mut() {
+            last.push_str(hard_break);
+        }
 
         if new_lines != orig_lines {
             changes.push((start_line + 1, orig_lines, new_lines.clone()));
@@ -755,6 +813,7 @@ mod tests {
         assert!(starts_with_hierarchical_marker("A. lettered"));
         assert!(starts_with_hierarchical_marker("a. lower"));
         assert!(starts_with_hierarchical_marker("```code"));
+        assert!(starts_with_hierarchical_marker("~~~"));
         assert!(!starts_with_hierarchical_marker("normal text"));
     }
 
@@ -916,6 +975,17 @@ pub trait Drain {
         let input = "// text before\n// | a | b |\n// | - | - |\n// text after\n// more\n";
         let (output, _) = process_content(input, 132);
         assert_eq!(output, "// text before\n// | a | b |\n// | - | - |\n// text after more\n");
+    }
+
+    #[test]
+    fn test_table_rows_with_hard_breaks_and_tilde_fences() {
+        // Table rows keep trailing backslashes and spaces, and a table inside a tilde fence doesn't end the code block.
+        let input = "// text\\\n// | a | b |  \n// | - | - |\\\n// ~~~\n// | c | d |\n// one\n// two\n// ~~~\n// three\n// four\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// text\\\n// | a | b |  \n// | - | - |\\\n// ~~~\n// | c | d |\n// one\n// two\n// ~~~\n// three four\n"
+        );
     }
 
     #[test]
@@ -1149,6 +1219,56 @@ pub trait Drain {
     }
 
     #[test]
+    fn test_code_fence() {
+        assert_eq!(code_fence("```"), Some(('`', 3)));
+        assert_eq!(code_fence("```rust"), Some(('`', 3)));
+        assert_eq!(code_fence("  ~~~~"), Some(('~', 4)));
+        assert_eq!(code_fence("~~"), None);
+        assert_eq!(code_fence("``"), None);
+        assert_eq!(code_fence("text ```"), None);
+        assert!(closes_code_fence("~~~", ('~', 3)));
+        assert!(closes_code_fence("~~~~~  ", ('~', 3)));
+        assert!(!closes_code_fence("~~~", ('~', 4)));
+        assert!(!closes_code_fence("```", ('~', 3)));
+        assert!(!closes_code_fence("~~~ rust", ('~', 3)));
+    }
+
+    #[test]
+    fn test_no_wrap_or_combine_inside_tilde_fence() {
+        let input = "    /// ~~~\n    /// # use ring_buffer::{Drain, RingBuffer};\n    /// let mut buffer = RingBuffer::with_capacity(3).unwrap();\n    /// buffer.push(\"x\").unwrap();\n    /// assert_eq!(buffer.drain_all(), [\"x\"]); // a long trailing comment that is much wider than the configured width\n    /// ~~~\n";
+        let (output, changes) = process_content(input, 60);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_wrap_inside_tilde_fence_plain_comment() {
+        let input = "// ~~~\n// Tilde fence in a plain comment, followed by a very long line.\n// ~~~\n";
+        let (output, changes) = process_content(input, 40);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_fence_closed_only_by_matching_fence() {
+        // A backtick fence and a shorter tilde fence do not close a `~~~~` block.
+        let input = "// ~~~~\n// ```\n// ~~~\n// one\n// two\n// ~~~~\n// hello\n// world\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// ~~~~\n// ```\n// ~~~\n// one\n// two\n// ~~~~\n// hello world\n");
+    }
+
+    #[test]
+    fn test_hard_line_breaks_around_tilde_fence() {
+        // Hard breaks inside the block are passed through, and a closing fence with trailing spaces still closes it.
+        let input = "// one\\\n// ~~~\n// a very long line inside the fence that is wider than the width\\\n// b  \n// ~~~  \n// two\n// three\n";
+        let (output, _) = process_content(input, 40);
+        assert_eq!(
+            output,
+            "// one\\\n// ~~~\n// a very long line inside the fence that is wider than the width\\\n// b  \n// ~~~  \n// two three\n"
+        );
+    }
+
+    #[test]
     fn test_hierarchical_marker_width() {
         assert_eq!(hierarchical_marker_width("- item"), 2);
         assert_eq!(hierarchical_marker_width("* item"), 2);
@@ -1268,6 +1388,68 @@ pub trait Drain {
         for line in output.lines() {
             assert_eq!(line, line.trim_end(), "trailing spaces in: {:?}", line);
         }
+    }
+
+    #[test]
+    fn test_ends_with_backslash_break() {
+        assert!(ends_with_backslash_break("text\\"));
+        assert!(ends_with_backslash_break("text\\\\\\"));
+        assert!(!ends_with_backslash_break("text\\\\"));
+        assert!(!ends_with_backslash_break("text\\ "));
+        assert!(!ends_with_backslash_break("text"));
+    }
+
+    #[test]
+    fn test_trailing_space_break() {
+        assert_eq!(trailing_space_break("text  "), "  ");
+        assert_eq!(trailing_space_break("text   "), "   ");
+        assert_eq!(trailing_space_break("text "), "");
+        assert_eq!(trailing_space_break("text"), "");
+    }
+
+    #[test]
+    fn test_no_combine_hard_line_break() {
+        let input =
+            "/// Line one ends with a backslash\\\n/// line two.\n///\n/// Line three ends with two spaces  \n/// line four.\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_hard_line_break_ends_run() {
+        let input = "// one\n// two\\\n// three\n// four  \n// five\n// six\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// one two\\\n// three four  \n// five six\n");
+    }
+
+    #[test]
+    fn test_wrap_keeps_trailing_space_break_on_last_line() {
+        let input = "// aaa bbb ccc ddd  \n// eee\n";
+        let (output, _) = process_content(input, 12);
+        assert_eq!(output, "// aaa bbb\n// ccc ddd  \n// eee\n");
+        let (again, changes) = process_content(&output, 12);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_keeps_backslash_break_on_last_line() {
+        let input = "// aaa bbb ccc ddd\\\n// eee\n";
+        let (output, _) = process_content(input, 12);
+        assert_eq!(output, "// aaa bbb\n// ccc ddd\\\n// eee\n");
+    }
+
+    #[test]
+    fn test_wrap_does_not_end_line_with_backslash() {
+        let result = wrap_text("aaa bbb\\ ccc ddd", "// ", "// ", 12);
+        assert_eq!(result, vec!["// aaa", "// bbb\\ ccc", "// ddd"]);
+    }
+
+    #[test]
+    fn test_blank_comment_with_trailing_spaces_is_trimmed() {
+        let (output, _) = process_content("//   \n", 80);
+        assert_eq!(output, "//\n");
     }
 
     #[test]
