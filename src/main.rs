@@ -245,23 +245,13 @@ fn ends_marker(rest: &str) -> bool {
     matches!(rest.as_bytes().first(), None | Some(b' ' | b'\t'))
 }
 
-/// Returns the label of an ordered list marker at the start of `text`, ignoring leading whitespace: a single letter or one or more
-/// digits, followed by `.` and a space, a tab, or the end of the line (e.g. `A` for `A. item`, `10` for `10. item`), or the label
-/// of an ordered marker recognized by [`spaced_list_marker_width`] (e.g. `1` for `1) item`, `ii` for `ii. item`).
+/// Returns the number of a CommonMark ordered list marker at the start of `text`: 1 to 9 digits followed by `.` or `)` and a
+/// space, a tab, or the end of the line (e.g. `10` for `10. item`, `1` for `1) item`). Letters and Roman numerals are not
+/// markers.
 fn ordered_marker_label(text: &str) -> Option<&str> {
-    let text = text.trim_start();
-    if let Some((label, rest)) = text.split_once('.') {
-        let is_label = label.bytes().all(|b| b.is_ascii_digit()) || (label.len() == 1 && label.as_bytes()[0].is_ascii_alphabetic());
-        if !label.is_empty() && is_label && ends_marker(rest) {
-            return Some(label);
-        }
-    }
-    match spaced_list_marker_width(text) {
-        0 => None,
-        _ if text.starts_with('+') => None,
-        // The marker is the label followed by a delimiter and a space.
-        width => Some(&text[..width - 2]),
-    }
+    let digits = text.bytes().take_while(u8::is_ascii_digit).count();
+    let rest = text[digits..].strip_prefix(['.', ')'])?;
+    ((1..=9).contains(&digits) && ends_marker(rest)).then_some(&text[..digits])
 }
 
 /// Returns `true` if `text` begins with a list marker, ignoring leading whitespace (nested list items are indented): `*` or `-`
@@ -302,17 +292,15 @@ fn starts_with_hierarchical_marker(text: &str) -> bool {
 
 /// Returns `true` if `next` starts a new block instead of continuing `current`.
 ///
-/// As in CommonMark, an ordered list item can interrupt a paragraph only if it starts the list, so a line starting with an ordered
-/// marker whose label is not `1`, `A`, `a`, `I`, or `i` (e.g. `2026. That was the year.`) continues a paragraph. It starts a new
-/// item only when `current` is itself a list item.
+/// As in CommonMark, an ordered list item can interrupt a paragraph only if its number is 1, so a line starting with any other
+/// ordered marker (e.g. `2026. That was the year.`) continues a paragraph. It starts a new item only when `current` is itself a
+/// list item.
 fn starts_new_block(current: &str, next: &str) -> bool {
     if !starts_with_hierarchical_marker(next) {
         return false;
     }
-    match ordered_marker_label(next) {
-        Some(label) if !(label.parse::<u64>() == Ok(1) || matches!(label, "A" | "a" | "I" | "i")) => {
-            starts_with_list_marker(current)
-        }
+    match ordered_marker_label(next.trim_start()) {
+        Some(label) if label.parse::<u32>() != Ok(1) => starts_with_list_marker(current),
         _ => true,
     }
 }
@@ -324,7 +312,8 @@ fn is_atx_heading(text: &str) -> bool {
     (1..=6).contains(&hashes) && matches!(text.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
 }
 
-/// Returns the width of a hierarchical marker prefix (e.g. `- ` → 2, `1. ` → 3, `10. ` → 4, `## ` → 3).
+/// Returns the width of a hierarchical marker prefix followed by a space (e.g. `- ` → 2, `+ ` → 2, `1. ` → 3, `10) ` → 4,
+/// `## ` → 3).
 ///
 /// Returns 0 if the text does not start with a recognized marker.
 fn hierarchical_marker_width(text: &str) -> usize {
@@ -334,95 +323,14 @@ fn hierarchical_marker_width(text: &str) -> usize {
             return hashes + 1;
         }
     }
-    if matches!(text.as_bytes().first(), Some(b'-' | b'*')) && text.as_bytes().get(1) == Some(&b' ') {
+    if matches!(text.as_bytes().first(), Some(b'-' | b'*' | b'+')) && text.as_bytes().get(1) == Some(&b' ') {
         return 2;
     }
-    let bytes = text.as_bytes();
-    if let Some(&first) = bytes.first()
-        && first.is_ascii_alphanumeric()
-    {
-        if !first.is_ascii_digit() {
-            // Single letter: `A. `
-            if bytes.get(1) == Some(&b'.') && bytes.get(2) == Some(&b' ') {
-                return 3;
-            }
-        } else {
-            // Multi-digit: `1. `, `10. `, `100. `, etc.
-            let digit_count = bytes.iter().take_while(|b| b.is_ascii_digit()).count();
-            if bytes.get(digit_count) == Some(&b'.') && bytes.get(digit_count + 1) == Some(&b' ') {
-                return digit_count + 2;
-            }
-        }
+    match ordered_marker_label(text) {
+        // The marker is the number followed by a delimiter and a space.
+        Some(label) if text.as_bytes().get(label.len() + 1) == Some(&b' ') => label.len() + 2,
+        _ => 0,
     }
-    spaced_list_marker_width(text)
-}
-
-/// Returns the width of a list marker that is recognized only when followed by a space: `+ ` → 2, digits or a single letter
-/// followed by `)` (e.g. `1) ` → 3, `a) ` → 3), or a Roman numeral followed by `.` or `)` (e.g. `ii. ` → 4, `XII) ` → 5).
-///
-/// Returns 0 if the text does not start with one of these markers.
-fn spaced_list_marker_width(text: &str) -> usize {
-    if text.starts_with("+ ") {
-        return 2;
-    }
-    let label_len = text.bytes().take_while(u8::is_ascii_alphanumeric).count();
-    let (label, rest) = text.split_at(label_len);
-    let followed_by = |delimiter: u8| rest.as_bytes().first() == Some(&delimiter) && rest.as_bytes().get(1) == Some(&b' ');
-    let is_number = label_len > 0 && label.bytes().all(|b| b.is_ascii_digit());
-    let is_letter = label_len == 1 && label.as_bytes()[0].is_ascii_alphabetic();
-    if ((is_number || is_letter) && followed_by(b')')) || (is_roman(label) && (followed_by(b'.') || followed_by(b')'))) {
-        return label_len + 2;
-    }
-    0
-}
-
-/// Returns `true` if `s` is a Roman numeral in canonical form (e.g. `iv`, `XII`), written entirely in uppercase or entirely in
-/// lowercase. Non-canonical forms such as `iiii` or `ic` are rejected, which keeps words like `did` or `mid` from matching.
-fn is_roman(s: &str) -> bool {
-    const NUMERALS: [(isize, &str); 13] = [
-        (1000, "M"),
-        (900, "CM"),
-        (500, "D"),
-        (400, "CD"),
-        (100, "C"),
-        (90, "XC"),
-        (50, "L"),
-        (40, "XL"),
-        (10, "X"),
-        (9, "IX"),
-        (5, "V"),
-        (4, "IV"),
-        (1, "I"),
-    ];
-    if s.is_empty() || !(s.bytes().all(|b| b.is_ascii_uppercase()) || s.bytes().all(|b| b.is_ascii_lowercase())) {
-        return false;
-    }
-    let upper = s.to_ascii_uppercase();
-    let digit = |c: char| {
-        NUMERALS
-            .iter()
-            .find(|(_, n)| n.len() == 1 && n.starts_with(c))
-            .map(|&(v, _)| v)
-    };
-    let Some(values) = upper.chars().map(digit).collect::<Option<Vec<_>>>() else {
-        return false;
-    };
-    let mut value = 0;
-    for (i, &v) in values.iter().enumerate() {
-        if values.get(i + 1).is_some_and(|&next| next > v) {
-            value -= v;
-        } else {
-            value += v;
-        }
-    }
-    let mut canonical = String::new();
-    for (v, numeral) in NUMERALS {
-        while value >= v {
-            canonical.push_str(numeral);
-            value -= v;
-        }
-    }
-    canonical == upper
 }
 
 /// Returns `true` if `text` is a divider: four or more repetitions of a single punctuation character (e.g. `----`, `=====`,
@@ -1251,8 +1159,8 @@ mod tests {
         assert!(starts_with_hierarchical_marker("* bullet"));
         assert!(starts_with_hierarchical_marker("- dash"));
         assert!(starts_with_hierarchical_marker("1. numbered"));
-        assert!(starts_with_hierarchical_marker("A. lettered"));
-        assert!(starts_with_hierarchical_marker("a. lower"));
+        assert!(!starts_with_hierarchical_marker("A. lettered"));
+        assert!(!starts_with_hierarchical_marker("a. lower"));
         assert!(starts_with_hierarchical_marker("```code"));
         assert!(starts_with_hierarchical_marker("~~~"));
         assert!(!starts_with_hierarchical_marker("normal text"));
@@ -2161,7 +2069,7 @@ pub trait Drain {
         assert_eq!(hierarchical_marker_width("- item"), 2);
         assert_eq!(hierarchical_marker_width("* item"), 2);
         assert_eq!(hierarchical_marker_width("1. item"), 3);
-        assert_eq!(hierarchical_marker_width("A. item"), 3);
+        assert_eq!(hierarchical_marker_width("A. item"), 0);
         assert_eq!(hierarchical_marker_width("# heading"), 2);
         assert_eq!(hierarchical_marker_width("## heading"), 3);
         assert_eq!(hierarchical_marker_width("### heading"), 4);
@@ -2172,41 +2080,61 @@ pub trait Drain {
     }
 
     #[test]
-    fn test_is_roman() {
-        for s in ["i", "ii", "iv", "ix", "xii", "XII", "MCMXCIX", "civ"] {
-            assert!(is_roman(s), "{s}");
-        }
-        for s in ["", "iiii", "ic", "Ii", "etc", "eg", "did", "mid", "vx"] {
-            assert!(!is_roman(s), "{s}");
-        }
-    }
-
-    #[test]
     fn test_spaced_list_markers() {
         assert!(starts_with_hierarchical_marker("+ plus"));
         assert!(starts_with_hierarchical_marker("1) first"));
         assert!(starts_with_hierarchical_marker("10) tenth"));
-        assert!(starts_with_hierarchical_marker("a) letter"));
-        assert!(starts_with_hierarchical_marker("ii. second"));
-        assert!(starts_with_hierarchical_marker("iv) fourth"));
-        assert!(starts_with_hierarchical_marker("XII. twelfth"));
+        assert!(starts_with_hierarchical_marker("2)\ttab"));
+        assert!(starts_with_hierarchical_marker("3)"));
         assert!(!starts_with_hierarchical_marker("+1 is positive"));
         assert!(!starts_with_hierarchical_marker("1)no space"));
         assert!(!starts_with_hierarchical_marker("etc. and so on"));
-        assert!(!starts_with_hierarchical_marker("ab) not a marker"));
-        assert!(!starts_with_hierarchical_marker("iiii. not canonical"));
         assert_eq!(hierarchical_marker_width("+ plus"), 2);
         assert_eq!(hierarchical_marker_width("1) first"), 3);
         assert_eq!(hierarchical_marker_width("10) tenth"), 4);
-        assert_eq!(hierarchical_marker_width("a) letter"), 3);
-        assert_eq!(hierarchical_marker_width("ii. second"), 4);
-        assert_eq!(hierarchical_marker_width("XII) twelfth"), 5);
         assert_eq!(hierarchical_marker_width("etc. and so on"), 0);
     }
 
     #[test]
+    fn test_letters_and_roman_numerals_are_not_list_markers() {
+        for text in [
+            "A. Turing",
+            "a. lower",
+            "a) letter",
+            "B) upper",
+            "i. first",
+            "ii. second",
+            "iv) fourth",
+            "XII. twelfth",
+        ] {
+            assert!(!starts_with_hierarchical_marker(text), "{text:?}");
+            assert_eq!(hierarchical_marker_width(text), 0, "{text:?}");
+            assert_eq!(ordered_marker_label(text), None, "{text:?}");
+            assert!(!starts_new_block("A paragraph.", text), "{text:?}");
+        }
+    }
+
+    #[test]
+    fn test_ordered_marker_has_at_most_nine_digits() {
+        assert_eq!(ordered_marker_label("123456789. nine digits"), Some("123456789"));
+        assert_eq!(ordered_marker_label("1234567890. ten digits"), None);
+        assert_eq!(ordered_marker_label("1234567890) ten digits"), None);
+        assert_eq!(hierarchical_marker_width("1234567890. ten digits"), 0);
+    }
+
+    #[test]
+    fn test_letter_and_roman_lines_are_combined_without_hanging_indent() {
+        let input = "/// The halting problem was shown to be undecidable by\n/// A. Turing in 1936.\nfn a() {}\n\n/// The steps are:\n///\n/// i. Read the input.\n/// ii. Compute the checksum.\nfn b() {}\n\n/// a. This sentence starts with a letter and a period, and it is long enough to wrap.\nfn c() {}\n";
+        let (output, _) = process_content(input, 60);
+        assert_eq!(
+            output,
+            "/// The halting problem was shown to be undecidable by A.\n/// Turing in 1936.\nfn a() {}\n\n/// The steps are:\n///\n/// i. Read the input. ii. Compute the checksum.\nfn b() {}\n\n/// a. This sentence starts with a letter and a period, and\n/// it is long enough to wrap.\nfn c() {}\n"
+        );
+    }
+
+    #[test]
     fn test_no_combine_spaced_list_markers() {
-        let input = "// I. Roman numerals are sometimes used for lists.\n// ii. Second roman item.\n// + Plus signs are valid CommonMark bullets too.\n// + Second plus-sign bullet.\n// 1) Parenthesized ordered list markers are also valid CommonMark.\n// 2) Second item.\n";
+        let input = "// + Plus signs are valid CommonMark bullets too.\n// + Second plus-sign bullet.\n// 1) Parenthesized ordered list markers are also valid CommonMark.\n// 2) Second item.\n";
         let (output, changes) = process_content(input, 80);
         assert_eq!(output, input);
         assert!(changes.is_empty());
@@ -2214,32 +2142,32 @@ pub trait Drain {
 
     #[test]
     fn test_wrap_spaced_list_markers_with_indent() {
-        let input = "// ii. A roman item that is long enough to wrap\n// 12) A numbered item that is long enough to wrap\n// + A plus item that is long enough to wrap\n";
+        let input = "// 12) A numbered item that is long enough to wrap\n// + A plus item that is long enough to wrap\n";
         let (output, _) = process_content(input, 32);
         assert_eq!(
             output,
-            "// ii. A roman item that is long\n//     enough to wrap\n// 12) A numbered item that is\n//     long enough to wrap\n// + A plus item that is long\n//   enough to wrap\n"
+            "// 12) A numbered item that is\n//     long enough to wrap\n// + A plus item that is long\n//   enough to wrap\n"
         );
     }
 
     #[test]
     fn test_spaced_list_markers_in_quote() {
-        let input = "// > + one\n// > + two\n// > 1) three\n// > iv. four\n";
+        let input = "// > + one\n// > + two\n// > 1) three\n// > 4) four\n";
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
-        let (output, _) = process_content("// > ii. aaa bbb ccc ddd\n", 20);
-        assert_eq!(output, "// > ii. aaa bbb ccc\n// >     ddd\n");
+        let (output, _) = process_content("// > 12) aaa bbb ccc ddd\n", 20);
+        assert_eq!(output, "// > 12) aaa bbb ccc\n// >     ddd\n");
     }
 
     #[test]
     fn test_indented_code_block_in_spaced_list_item() {
-        // Inside a `ii.` item, content starts at column 4, so code is indented 8 columns.
-        let input = "/// ii. item\n///\n///     nested paragraph\n///     continued\n///\n///         code a\n///         code b\n";
+        // Inside a `10)` item, content starts at column 4, so code is indented 8 columns.
+        let input = "/// 10) item\n///\n///     nested paragraph\n///     continued\n///\n///         code a\n///         code b\n";
         let (output, _) = process_content(input, 100);
         assert_eq!(
             output,
-            "/// ii. item\n///\n///     nested paragraph continued\n///\n///         code a\n///         code b\n"
+            "/// 10) item\n///\n///     nested paragraph continued\n///\n///         code a\n///         code b\n"
         );
         // A `+` item's content starts at column 2, so a line indented 6 columns is code.
         let input = "/// + item\n///\n///       code a\n///       code b\n";
@@ -2260,7 +2188,7 @@ pub trait Drain {
         assert!(starts_with_hierarchical_marker("-"));
         assert!(starts_with_hierarchical_marker("*\tbullet"));
         assert!(starts_with_hierarchical_marker("1."));
-        assert!(starts_with_hierarchical_marker("a.\tlower"));
+        assert!(starts_with_hierarchical_marker("2.\tsecond"));
         assert!(!starts_with_hierarchical_marker("*Emphasis* at the start"));
         assert!(!starts_with_hierarchical_marker("**Bold** at the start"));
         assert!(!starts_with_hierarchical_marker("--verbose prints more"));
@@ -2274,13 +2202,11 @@ pub trait Drain {
     #[test]
     fn test_ordered_marker_interrupts_paragraph_only_at_start() {
         assert!(starts_new_block("A paragraph.", "1. first"));
-        assert!(starts_new_block("A paragraph.", "A. first"));
-        assert!(starts_new_block("A paragraph.", "a. first"));
+        assert!(starts_new_block("A paragraph.", "01. first"));
         assert!(starts_new_block("A paragraph.", "- bullet"));
         assert!(!starts_new_block("A paragraph.", "2026. That was the year."));
-        assert!(!starts_new_block("A paragraph.", "B. Smith wrote it."));
         assert!(starts_new_block("1. first", "2. second"));
-        assert!(starts_new_block("A. first", "B. second"));
+        assert!(starts_new_block("  1. first", "  2. second"));
         assert!(starts_new_block("- bullet", "3. third"));
     }
 
@@ -2300,26 +2226,20 @@ pub trait Drain {
     #[test]
     fn test_spaced_ordered_marker_interrupts_paragraph_only_at_start() {
         assert!(starts_new_block("A paragraph.", "1) first"));
-        assert!(starts_new_block("A paragraph.", "a) first"));
-        assert!(starts_new_block("A paragraph.", "i. first"));
-        assert!(starts_new_block("A paragraph.", "I) first"));
         assert!(starts_new_block("A paragraph.", "+ plus"));
         assert!(!starts_new_block("A paragraph.", "2) second"));
-        assert!(!starts_new_block("A paragraph.", "ii. second"));
-        assert!(!starts_new_block("A paragraph.", "XII) twelfth"));
-        assert!(starts_new_block("i. first", "ii. second"));
         assert!(starts_new_block("1) first", "2) second"));
         assert!(starts_new_block("+ plus", "2) second"));
         assert!(!starts_new_block("A paragraph.", "+1 is positive"));
-        assert_eq!(ordered_marker_label("XII) twelfth"), Some("XII"));
+        assert_eq!(ordered_marker_label("12) twelfth"), Some("12"));
         assert_eq!(ordered_marker_label("+ plus"), None);
     }
 
     #[test]
     fn test_combine_spaced_markers_mid_paragraph_and_in_quote() {
-        let input = "// text\n// 2) continues\n// ii. continues\n// i. first\n// ii. second\n";
+        let input = "// text\n// 2) continues\n// ii. continues\n// 1) first\n// 2) second\n";
         let (output, _) = process_content(input, 132);
-        assert_eq!(output, "// text 2) continues ii. continues\n// i. first\n// ii. second\n");
+        assert_eq!(output, "// text 2) continues ii. continues\n// 1) first\n// 2) second\n");
 
         let input = "// > text\n// > 2026. continues\n// > *emphasis* continues\n// > 1. first\n// > 2. second\n";
         let (output, _) = process_content(input, 132);
