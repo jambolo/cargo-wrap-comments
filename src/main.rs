@@ -116,6 +116,39 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
     })
 }
 
+/// Returns `true` if `rest` is empty or starts with a space or tab, as required after a list marker.
+fn ends_marker(rest: &str) -> bool {
+    matches!(rest.as_bytes().first(), None | Some(b' ' | b'\t'))
+}
+
+/// Returns the label of an ordered list marker at the start of `text`, ignoring leading whitespace: a single letter or one or more
+/// digits, followed by `.` and a space, a tab, or the end of the line (e.g. `A` for `A. item`, `10` for `10. item`), or the label
+/// of an ordered marker recognized by [`spaced_list_marker_width`] (e.g. `1` for `1) item`, `ii` for `ii. item`).
+fn ordered_marker_label(text: &str) -> Option<&str> {
+    let text = text.trim_start();
+    if let Some((label, rest)) = text.split_once('.') {
+        let is_label = label.bytes().all(|b| b.is_ascii_digit()) || (label.len() == 1 && label.as_bytes()[0].is_ascii_alphabetic());
+        if !label.is_empty() && is_label && ends_marker(rest) {
+            return Some(label);
+        }
+    }
+    match spaced_list_marker_width(text) {
+        0 => None,
+        _ if text.starts_with('+') => None,
+        // The marker is the label followed by a delimiter and a space.
+        width => Some(&text[..width - 2]),
+    }
+}
+
+/// Returns `true` if `text` begins with a list marker, ignoring leading whitespace (nested list items are indented): `*` or `-`
+/// followed by a space, a tab, or the end of the line, `+` followed by a space, or an ordered marker (see
+/// [`ordered_marker_label`]).
+fn starts_with_list_marker(text: &str) -> bool {
+    let text = text.trim_start();
+    let bullet = text.strip_prefix(['*', '-']).is_some_and(ends_marker) || text.starts_with("+ ");
+    bullet || ordered_marker_label(text).is_some()
+}
+
 /// Returns the fence character and length if `text`, ignoring leading whitespace, starts with a code fence: three or more
 /// backticks or tildes (e.g. `` ``` ``, `~~~~`).
 fn code_fence(text: &str) -> Option<(char, usize)> {
@@ -136,35 +169,28 @@ fn closes_code_fence(text: &str, open: (char, usize)) -> bool {
 /// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
 /// indented).
 ///
-/// Recognized markers: an ATX heading (see [`is_atx_heading`]), `*`, `-`, a code fence (`` ``` `` or `~~~`), a single letter
-/// followed by `.` (e.g. `A.`, `a.`), or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`), plus the markers
-/// recognized by [`spaced_list_marker_width`].
+/// Recognized markers: an ATX heading (see [`is_atx_heading`]), a code fence (`` ``` `` or `~~~`), and the list markers
+/// recognized by [`starts_with_list_marker`].
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     let text = text.trim_start();
-    if is_atx_heading(text)
-        || matches!(text.as_bytes().first(), Some(b'*' | b'-'))
-        || code_fence(text).is_some()
-        || spaced_list_marker_width(text) > 0
-    {
-        return true;
+    is_atx_heading(text) || code_fence(text).is_some() || starts_with_list_marker(text)
+}
+
+/// Returns `true` if `next` starts a new block instead of continuing `current`.
+///
+/// As in CommonMark, an ordered list item can interrupt a paragraph only if it starts the list, so a line starting with an ordered
+/// marker whose label is not `1`, `A`, `a`, `I`, or `i` (e.g. `2026. That was the year.`) continues a paragraph. It starts a new
+/// item only when `current` is itself a list item.
+fn starts_new_block(current: &str, next: &str) -> bool {
+    if !starts_with_hierarchical_marker(next) {
+        return false;
     }
-    let mut chars = text.chars();
-    if let Some(c) = chars.next()
-        && c.is_ascii_alphanumeric()
-    {
-        if !c.is_ascii_digit() {
-            return chars.next() == Some('.');
+    match ordered_marker_label(next) {
+        Some(label) if !(label.parse::<u64>() == Ok(1) || matches!(label, "A" | "a" | "I" | "i")) => {
+            starts_with_list_marker(current)
         }
-        for ch in chars {
-            if ch == '.' {
-                return true;
-            }
-            if !ch.is_ascii_digit() {
-                return false;
-            }
-        }
+        _ => true,
     }
-    false
 }
 
 /// Returns `true` if `text` is a CommonMark ATX heading: 1 to 6 `#` characters followed by a space, a tab, or the end of the line.
@@ -375,9 +401,9 @@ fn trailing_space_break(text: &str) -> &str {
 ///
 /// Lines are combined when they share the same marker, indentation, and block quote depth, and the following rules hold for the
 /// text after any block quote prefix: neither is blank, a divider, a thematic break, a table row, or an SPDX tag, the next line
-/// doesn't start with a hierarchical marker or an annotation tag, the current line doesn't start with or contain a code fence or
-/// end with a hard line break (a backslash or two or more spaces), and a markdown heading line (see [`is_atx_heading`]) is not
-/// combined with the text that follows.
+/// doesn't start a new block (see [`starts_new_block`]) or start with an annotation tag, the current line doesn't start with or
+/// contain a code fence or end with a hard line break (a backslash or two or more spaces), and a markdown heading line (see
+/// [`is_atx_heading`]) is not combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     let (_, current_depth, current_text) = split_quote(&current.text);
     let (_, next_depth, next_text) = split_quote(&next.text);
@@ -397,7 +423,7 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !is_spdx_line(current_text)
         && !is_spdx_line(next_text)
         && !starts_with_annotation_tag(next_text)
-        && !starts_with_hierarchical_marker(next_text)
+        && !starts_new_block(current_text, next_text)
         && !current_text.contains("```")
         && code_fence(current_text).is_none()
         && !is_atx_heading(current_text)
@@ -1881,8 +1907,90 @@ pub trait Drain {
     }
 
     #[test]
+    fn test_marker_requires_following_space() {
+        assert!(starts_with_hierarchical_marker("-"));
+        assert!(starts_with_hierarchical_marker("*\tbullet"));
+        assert!(starts_with_hierarchical_marker("1."));
+        assert!(starts_with_hierarchical_marker("a.\tlower"));
+        assert!(!starts_with_hierarchical_marker("*Emphasis* at the start"));
+        assert!(!starts_with_hierarchical_marker("**Bold** at the start"));
+        assert!(!starts_with_hierarchical_marker("--verbose prints more"));
+        assert!(!starts_with_hierarchical_marker("-1 is negative"));
+        assert!(!starts_with_hierarchical_marker("e.g. an abbreviation"));
+        assert!(!starts_with_hierarchical_marker("3.14 is close to pi"));
+        assert!(!starts_with_hierarchical_marker("1.0.0 is a version"));
+        assert!(!starts_with_hierarchical_marker("ab. two letters"));
+    }
+
+    #[test]
+    fn test_ordered_marker_interrupts_paragraph_only_at_start() {
+        assert!(starts_new_block("A paragraph.", "1. first"));
+        assert!(starts_new_block("A paragraph.", "A. first"));
+        assert!(starts_new_block("A paragraph.", "a. first"));
+        assert!(starts_new_block("A paragraph.", "- bullet"));
+        assert!(!starts_new_block("A paragraph.", "2026. That was the year."));
+        assert!(!starts_new_block("A paragraph.", "B. Smith wrote it."));
+        assert!(starts_new_block("1. first", "2. second"));
+        assert!(starts_new_block("A. first", "B. second"));
+        assert!(starts_new_block("- bullet", "3. third"));
+    }
+
+    #[test]
+    fn test_combine_lines_that_only_look_like_list_items() {
+        let input = "// A sentence before.\n// *Emphasis* at the start of a line.\n// **Bold** at the start of a line.\n// 2026. \
+                     That was the year.\n// e.g. a line starting with an abbreviation.\n// 3.14 is close to pi.\n// --verbose prints \
+                     more.\n// -1 is negative.\n// A sentence after.\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// A sentence before. *Emphasis* at the start of a line. **Bold** at the start of a line. 2026. That was the year. e.g. a line\n\
+             // starting with an abbreviation. 3.14 is close to pi. --verbose prints more. -1 is negative. A sentence after.\n"
+        );
+    }
+
+    #[test]
+    fn test_spaced_ordered_marker_interrupts_paragraph_only_at_start() {
+        assert!(starts_new_block("A paragraph.", "1) first"));
+        assert!(starts_new_block("A paragraph.", "a) first"));
+        assert!(starts_new_block("A paragraph.", "i. first"));
+        assert!(starts_new_block("A paragraph.", "I) first"));
+        assert!(starts_new_block("A paragraph.", "+ plus"));
+        assert!(!starts_new_block("A paragraph.", "2) second"));
+        assert!(!starts_new_block("A paragraph.", "ii. second"));
+        assert!(!starts_new_block("A paragraph.", "XII) twelfth"));
+        assert!(starts_new_block("i. first", "ii. second"));
+        assert!(starts_new_block("1) first", "2) second"));
+        assert!(starts_new_block("+ plus", "2) second"));
+        assert!(!starts_new_block("A paragraph.", "+1 is positive"));
+        assert_eq!(ordered_marker_label("XII) twelfth"), Some("XII"));
+        assert_eq!(ordered_marker_label("+ plus"), None);
+    }
+
+    #[test]
+    fn test_combine_spaced_markers_mid_paragraph_and_in_quote() {
+        let input = "// text\n// 2) continues\n// ii. continues\n// i. first\n// ii. second\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// text 2) continues ii. continues\n// i. first\n// ii. second\n");
+
+        let input = "// > text\n// > 2026. continues\n// > *emphasis* continues\n// > 1. first\n// > 2. second\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// > text 2026. continues *emphasis* continues\n// > 1. first\n// > 2. second\n"
+        );
+    }
+
+    #[test]
+    fn test_no_combine_ordered_list_items() {
+        let input = "// 1. first\n// 2. second\n// 3. third\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
     fn test_no_combine_multi_digit_numbered() {
-        let input = "// first line\n// 10. tenth item\n";
+        let input = "// 9. ninth item\n// 10. tenth item\n";
         let (output, _) = process_content(input, 132);
         assert_eq!(output, input);
     }

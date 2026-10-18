@@ -84,7 +84,7 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 2. Same indentation level
 3. Same block quote depth (the number of leading `>`). The rules below apply to the text after the `>` prefix, and the prefix is repeated on every wrapped line.
 4. Neither line is blank
-5. The next line does not start with a hierarchical marker: a heading (`#`), `*`, `-`, `` ``` ``, `~~~`, `1.`, `A.`, `a.`, or one of these followed by a space: `+`, `1)`, `a)`, a Roman numeral followed by `.` or `)` (e.g. `ii.`, `XII)`)
+5. The next line does not start with a hierarchical marker: a heading (`#`), a code fence (`` ``` `` or `~~~`), a list marker (`*`, `-`, `1.`, `A.`, `a.`) followed by a space, a tab, or the end of the line, or one of these followed by a space: `+`, `1)`, `a)`, a Roman numeral followed by `.` or `)` (e.g. `ii.`, `XII)`). As in CommonMark, an ordered list marker whose label is not `1`, `A`, `a`, `I`, or `i` (e.g. `2026.`, `2)`, `ii.`) starts a new item only when the current line is itself a list item; otherwise the line continues the paragraph.
 6. The current line does not start with a code fence (`` ``` `` or `~~~`) or contain `` ``` ``
 7. The current line is not a markdown heading (1 to 6 `#` characters followed by a space, a tab, or the end of the line, so `#42` and `#hashtag` are not headings). Headings are not combined with the text that follows.
 8. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
