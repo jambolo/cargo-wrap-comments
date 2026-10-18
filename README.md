@@ -27,8 +27,8 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 
 ## Limitations
 
-- The tool is not intended to format markdown text in comments, although it does its best to respect markdown formatting.
-- Only markers or certain formatting are considered when joining adjacent lines. The tool cannot discern context or distinguish between code and prose. Separating two lines with a blank line or terminating the first with a backslash, '\\', will always prevent them from being joined.
+- The tool is not intended to format markdown text in comments, although it does its best to respect indentation.
+- Only markers or certain formatting are considered when joining adjacent lines. The tool cannot discern context or distinguish between code and prose. Separating two lines with a blank line, or terminating the first with a backslash, '\\', or two spaces will always prevent them from being joined.
 - The tool does not parse rust syntax, so text inside string literals that looks like a comment may be interpreted as a comment.
 - Trailing comments are not wrapped.
 - Lines with long text that cannot be split may not wrap as you might expect.
