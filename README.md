@@ -91,6 +91,8 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 9. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
 10. The current line does not end with a markdown hard line break (a backslash, or two or more spaces). Wrapping keeps the break at the end of the last output line, and never moves a backslash to the end of a line.
 11. Neither line is a markdown table row (starts with `|`). Table rows are never wrapped, even when wider than the line width.
+12. Neither line starts with an SPDX tag (e.g. `SPDX-License-Identifier:`). SPDX lines are also never wrapped.
+13. The next line does not start with an annotation tag (`TODO`, `FIXME`, `NOTE`, `HACK`, `XXX` or `SAFETY`, optionally followed by `(...)`, then `:`). Lines after a tagged line may still be combined into it.
 
 Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` `` or `~~~`) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation. A fenced code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence.
 
