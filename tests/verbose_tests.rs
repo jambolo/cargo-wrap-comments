@@ -5,12 +5,12 @@ fn cargo_bin() -> Command {
     Command::new(env!("CARGO_BIN_EXE_cargo-wrap-comments"))
 }
 
-fn create_temp_file(name: &str, content: &str) -> std::path::PathBuf {
-    let dir = std::env::temp_dir().join("cargo-wrap-comments-verbose-tests");
-    fs::create_dir_all(&dir).unwrap();
-    let path = dir.join(name);
+// Each test gets its own directory so concurrent `cargo test` runs don't share files.
+fn create_temp_file(name: &str, content: &str) -> (tempfile::TempDir, std::path::PathBuf) {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join(name);
     fs::write(&path, content).unwrap();
-    path
+    (dir, path)
 }
 
 const WRAPPABLE: &str = "// This is a very long comment line that will definitely exceed the default width of one hundred characters and need wrapping\n";
@@ -20,7 +20,7 @@ const SHORT: &str = "// short\n";
 
 #[test]
 fn verbose_shows_width_from_cli_arg() {
-    let path = create_temp_file("v_width_cli.rs", SHORT);
+    let (_dir, path) = create_temp_file("v_width_cli.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v", "-w", "80"])
         .arg(&path)
@@ -32,14 +32,12 @@ fn verbose_shows_width_from_cli_arg() {
 
 #[test]
 fn verbose_shows_default_width() {
-    let dir = std::env::temp_dir().join("cargo-wrap-comments-verbose-tests");
-    fs::create_dir_all(&dir).unwrap();
-    let path = create_temp_file("v_width_default.rs", SHORT);
+    let (dir, path) = create_temp_file("v_width_default.rs", SHORT);
+    // A config without `max_width` ends the search, so configs elsewhere on the machine can't affect the result.
+    fs::write(dir.path().join(".rustfmt.toml"), "").unwrap();
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v"])
         .arg(&path)
-        .current_dir(&dir)
-        .env("HOME", &dir)
         .output()
         .unwrap();
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -50,7 +48,7 @@ fn verbose_shows_default_width() {
 
 #[test]
 fn verbose_shows_file_count() {
-    let path = create_temp_file("v_count.rs", SHORT);
+    let (_dir, path) = create_temp_file("v_count.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v", "-w", "100"])
         .arg(&path)
@@ -64,7 +62,7 @@ fn verbose_shows_file_count() {
 
 #[test]
 fn verbose_unchanged_file_single_line() {
-    let path = create_temp_file("v_unchanged.rs", SHORT);
+    let (_dir, path) = create_temp_file("v_unchanged.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v", "-w", "100"])
         .arg(&path)
@@ -74,14 +72,14 @@ fn verbose_unchanged_file_single_line() {
     let line = stderr
         .lines()
         .find(|l| l.contains("unchanged"))
-        .expect(&format!("no unchanged line in stderr: {stderr}"));
+        .unwrap_or_else(|| panic!("no unchanged line in stderr: {stderr}"));
     assert!(line.contains("1 lines"), "missing line count: {line}");
     assert!(line.contains("v_unchanged.rs"), "missing file path: {line}");
 }
 
 #[test]
 fn verbose_modified_file_single_line() {
-    let path = create_temp_file("v_modified.rs", WRAPPABLE);
+    let (_dir, path) = create_temp_file("v_modified.rs", WRAPPABLE);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v", "-w", "100"])
         .arg(&path)
@@ -91,7 +89,7 @@ fn verbose_modified_file_single_line() {
     let line = stderr
         .lines()
         .find(|l| l.contains("change(s)"))
-        .expect(&format!("no change(s) line in stderr: {stderr}"));
+        .unwrap_or_else(|| panic!("no change(s) line in stderr: {stderr}"));
     assert!(line.contains("1 lines"), "missing line count: {line}");
     assert!(line.contains("1 change(s)"), "wrong change count: {line}");
 }
@@ -100,7 +98,7 @@ fn verbose_modified_file_single_line() {
 
 #[test]
 fn check_diff_output_on_stdout() {
-    let path = create_temp_file("v_stdout.rs", WRAPPABLE);
+    let (_dir, path) = create_temp_file("v_stdout.rs", WRAPPABLE);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-w", "100"])
         .arg(&path)
@@ -112,7 +110,7 @@ fn check_diff_output_on_stdout() {
 
 #[test]
 fn modified_message_on_stderr() {
-    let path = create_temp_file("v_stderr.rs", WRAPPABLE);
+    let (_dir, path) = create_temp_file("v_stderr.rs", WRAPPABLE);
     let output = cargo_bin().args(["wrap-comments", "-w", "100"]).arg(&path).output().unwrap();
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
@@ -122,7 +120,7 @@ fn modified_message_on_stderr() {
 
 #[test]
 fn summary_on_stderr() {
-    let path = create_temp_file("v_summary.rs", SHORT);
+    let (_dir, path) = create_temp_file("v_summary.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-w", "100"])
         .arg(&path)
@@ -136,7 +134,7 @@ fn summary_on_stderr() {
 
 #[test]
 fn quiet_suppresses_summary() {
-    let path = create_temp_file("v_quiet.rs", SHORT);
+    let (_dir, path) = create_temp_file("v_quiet.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-q", "-w", "100"])
         .arg(&path)
@@ -150,7 +148,7 @@ fn quiet_suppresses_summary() {
 
 #[test]
 fn verbose_overrides_quiet() {
-    let path = create_temp_file("v_override.rs", SHORT);
+    let (_dir, path) = create_temp_file("v_override.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-v", "-q", "-w", "100"])
         .arg(&path)
@@ -169,7 +167,7 @@ fn verbose_overrides_quiet() {
 
 #[test]
 fn no_verbose_hides_details() {
-    let path = create_temp_file("v_noverbose.rs", SHORT);
+    let (_dir, path) = create_temp_file("v_noverbose.rs", SHORT);
     let output = cargo_bin()
         .args(["wrap-comments", "--check", "-w", "100"])
         .arg(&path)

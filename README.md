@@ -7,15 +7,31 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 
 ## Features
 
-- Wraps long comments to a configurable width (default: 100 characters)
-- Reads `max_width` from `.rustfmt.toml` or `rustfmt.toml` if `--max-width` is not specified
+- Wraps long comments to a configurable width (default: 100 columns), measured in display columns as rustfmt measures it
+- Reads `max_width` from the rustfmt config file, located exactly as rustfmt locates it, if `--max-width` is not specified
 - Combines consecutive comment lines before wrapping
-- Supports Rust comment styles: `//`, `///`, `//!`
-- Preserves indentation, comment markers, and blank comment lines
-- Respects hierarchical markers (`#`, `*`, `-`, `1.`, `A.`, `a.`), back-tick quoted text, and code blocks
+- Supports Rust comment styles: `//`, `///`, `//!`, and block comments (`/* */`, `/** */`, `/*! */`)
+- Multi-line block comments whose opening delimiter is alone on its line are wrapped using the leading ` * ` of their lines, or
+  their common indentation if the lines have no leading asterisks, as the line prefix. Their opening and closing lines are left
+  unchanged.
+- A one-line block comment wider than the line width is split: the opening and closing delimiters go on their own lines at the
+  original indentation, and the text is wrapped between them at that indentation. Block comments that share a line with code,
+  and lines that contain a nested block comment delimiter, are left unchanged.
+- Preserves indentation, comment markers, the spacing after the marker, and blank comment lines
+- Leaves lines that are not combined or wrapped exactly as they are, except that trailing whitespace is removed from blank comment
+  lines
+- Respects hierarchical markers (`#`, `*`, `-`, `+`, `1.`, `1)`), back-tick quoted text, and code blocks
 - Glob pattern support for processing multiple files
 - Stdin/stdout mode when no files are specified
 - Check mode for previewing changes without modifying files
+
+## Limitations
+
+- The tool is not intended to format markdown text in comments, although it does its best to respect indentation.
+- Only markers or certain formatting are considered when joining adjacent lines. The tool cannot discern context or distinguish between code and prose. Separating two lines with a blank line, or terminating the first with a backslash, '\\', or two spaces will always prevent them from being joined.
+- The tool does not parse rust syntax, so text inside string literals that looks like a comment may be interpreted as a comment.
+- Trailing comments are not wrapped.
+- Lines with long text that cannot be split may not wrap as you might expect.
 
 ## Installation
 
@@ -61,6 +77,7 @@ cargo wrap-comments < src/main.rs
 | Option                 | Description                      | Default |
 |------------------------|----------------------------------|---------|
 | `-w`, `--max-width N`  | Maximum line width               | 100     |
+| `--config-path PATH`   | rustfmt config file or directory |         |
 | `--check`              | Preview mode, don't modify files |         |
 | `-v`, `--verbose`      | Print verbose output             |         |
 | `-q`, `--quiet`        | Print less output                |         |
@@ -71,22 +88,40 @@ cargo wrap-comments < src/main.rs
 
 Consecutive comment lines are combined before wrapping when ALL of these are true:
 
-1. Same comment marker (`//`, `///`, or `//!`)
+1. Same comment marker (`//`, `///`, `//!`, a run of four or more slashes, which is a plain comment, or the ` * ` prefix in a block comment)
 2. Same indentation level
-3. Neither line is blank
-4. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `1.`, `A.`, `a.`
-5. The current line does not contain a code fence marker (`` ``` ``)
-6. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
+3. Same block quote depth (the number of leading `>`). The rules below apply to the text after the `>` prefix, and the prefix is repeated on every wrapped line.
+4. Neither line is blank
+5. The next line does not start with a hierarchical marker: a heading (`#`), a code fence (`` ``` `` or `~~~`), a bullet (`*` or `-`) or an ordered list marker (1 to 9 digits followed by `.` or `)`, e.g. `1.`, `10)`) followed by a space, a tab, or the end of the line, or `+` followed by a space. As in CommonMark, letters and Roman numerals (e.g. `A.`, `a)`, `ii.`) are not list markers, and an ordered list marker whose number is not 1 (e.g. `2026.`, `2)`) starts a new item only when the current line is itself a list item; otherwise the line continues the paragraph.
+6. The current line does not start with a code fence (`` ``` `` or `~~~`) or contain `` ``` ``
+7. The current line is not a markdown heading (1 to 6 `#` characters followed by a space, a tab, or the end of the line, so `#42` and `#hashtag` are not headings). Headings are not combined with the text that follows.
+8. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
+9. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
+10. The current line does not end with a markdown hard line break (a backslash, or two or more spaces). Wrapping keeps the break at the end of the last output line, and never moves a backslash to the end of a line.
+11. Neither line is a markdown table row (starts with `|`). Table rows are never wrapped, even when wider than the line width.
+12. Neither line starts with an SPDX tag (e.g. `SPDX-License-Identifier:`). SPDX lines are also never wrapped.
+13. The next line does not start with an annotation tag (`TODO`, `FIXME`, `NOTE`, `HACK`, `XXX` or `SAFETY`, optionally followed by `(...)`, then `:`). Lines after a tagged line may still be combined into it.
+
+Lines inside code blocks are never combined or wrapped. This includes fenced code blocks (`` ``` `` or `~~~`) and markdown indented code blocks: text indented four or more spaces (counted from the start of a list item's content inside a list item) after a blank comment line or at the start of a comment block, continuing until a non-blank line with less indentation. A fenced code block is closed only by a fence of the same character (`` ` `` or `~`) that is at least as long as the opening fence. Inside a block quote, code blocks are found in the text after the `>` prefix, a fenced code block is closed only by a fence at the same quote depth, and a line with fewer `>` ends the code block.
 
 ## Width Resolution
 
 The line width is resolved in this order:
 
 1. `--max-width N` on the command line
-2. `max_width` from `.rustfmt.toml` or `rustfmt.toml`, searching from the current directory up to `$HOME`
+2. `max_width` from the rustfmt config file
 3. Default: 100
 
-The search stops at the first config file found. If it exists but has no `max_width`, the default is used.
+The config file is located the same way rustfmt locates it:
+
+- With `--config-path PATH`: if `PATH` is a file, that file is used. If it is a directory, the `.rustfmt.toml` or `rustfmt.toml` directly inside it is used; its parent directories are not searched. Otherwise it is an error.
+- Otherwise, for each file, the first `.rustfmt.toml` or `rustfmt.toml` found in this order (`.rustfmt.toml` first within each directory):
+  1. The file's directory, then each parent directory up to the filesystem root
+  2. The home directory
+  3. `rustfmt` in the user config directory (`$XDG_CONFIG_HOME` or `~/.config` on Linux, `~/Library/Application Support` on macOS, `%APPDATA%` on Windows)
+- For stdin, the search starts in the current directory.
+
+The search stops at the first config file found. If it has no `max_width`, the default is used. A config file that is not valid TOML, or whose `max_width` is not a non-negative integer, is an error, even when `--max-width` is given. All config files are checked before any file is modified.
 
 ## Exit Codes
 

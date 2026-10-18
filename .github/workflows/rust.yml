@@ -9,17 +9,17 @@ on:
 env:
   CARGO_TERM_COLOR: always
   TOOLCHAIN: stable
-  TARPAULIN_VERSION: 0.34.1
+  TARPAULIN_VERSION: 0.37.5
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
     - name: Checkout
-      uses: actions/checkout@v5
+      uses: actions/checkout@v7
 
     - name: Setup Rust toolchain
-      uses: actions-rust-lang/setup-rust-toolchain@v1
+      uses: actions-rust-lang/setup-rust-toolchain@v2
       with:
         toolchain: ${{ env.TOOLCHAIN }}
         components: |
@@ -27,7 +27,7 @@ jobs:
           rustfmt
         cache: true        # enable automatic caching (default, but explicit)
         cache-bin: true    # ensure ~/.cargo/bin (tarpaulin etc.) is cached
-        rustflags: ""      # avoid forcing RUSTFLAGS="-D warnings"
+        build-warnings: warn  # v2 defaults to deny
 
     - name: Check code formatting
       uses: actions-rust-lang/rustfmt@v1
@@ -50,7 +50,7 @@ jobs:
       continue-on-error: true
 
     - name: Upload coverage to Codecov
-      uses: codecov/codecov-action@v5
+      uses: codecov/codecov-action@v7
       with:
         files: tarpaulin-report.xml
         fail_ci_if_error: false
