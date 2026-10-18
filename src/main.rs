@@ -116,14 +116,35 @@ fn parse_comment_line(line: &str) -> Option<CommentLine> {
     })
 }
 
+/// Returns the fence character and length if `text`, ignoring leading whitespace, starts with a code fence: three or more
+/// backticks or tildes (e.g. `` ``` ``, `~~~~`).
+fn code_fence(text: &str) -> Option<(char, usize)> {
+    let text = text.trim_start();
+    let first @ ('`' | '~') = text.chars().next()? else {
+        return None;
+    };
+    let len = text.chars().take_while(|&c| c == first).count();
+    (len >= 3).then_some((first, len))
+}
+
+/// Returns `true` if `text` closes a code block opened by `open`: a fence of the same character, at least as long, followed only
+/// by whitespace.
+fn closes_code_fence(text: &str, open: (char, usize)) -> bool {
+    code_fence(text).is_some_and(|(c, len)| c == open.0 && len >= open.1 && text.trim_start()[len..].trim().is_empty())
+}
+
 /// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
 /// indented).
 ///
-/// Recognized markers: `#`, `*`, `-`, `` ``` ``, a single letter followed by `.` (e.g. `A.`, `a.`),
-/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`).
+/// Recognized markers: `#`, `*`, `-`, a code fence (`` ``` `` or `~~~`), a single letter followed by `.` (e.g. `A.`, `a.`),
+/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`), plus the markers recognized by
+/// [`spaced_list_marker_width`].
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     let text = text.trim_start();
-    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-')) || text.starts_with("```") {
+    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-'))
+        || code_fence(text).is_some()
+        || spaced_list_marker_width(text) > 0
+    {
         return true;
     }
     let mut chars = text.chars();
@@ -175,7 +196,75 @@ fn hierarchical_marker_width(text: &str) -> usize {
             }
         }
     }
+    spaced_list_marker_width(text)
+}
+
+/// Returns the width of a list marker that is recognized only when followed by a space: `+ ` → 2, digits or a single letter
+/// followed by `)` (e.g. `1) ` → 3, `a) ` → 3), or a Roman numeral followed by `.` or `)` (e.g. `ii. ` → 4, `XII) ` → 5).
+///
+/// Returns 0 if the text does not start with one of these markers.
+fn spaced_list_marker_width(text: &str) -> usize {
+    if text.starts_with("+ ") {
+        return 2;
+    }
+    let label_len = text.bytes().take_while(u8::is_ascii_alphanumeric).count();
+    let (label, rest) = text.split_at(label_len);
+    let followed_by = |delimiter: u8| rest.as_bytes().first() == Some(&delimiter) && rest.as_bytes().get(1) == Some(&b' ');
+    let is_number = label_len > 0 && label.bytes().all(|b| b.is_ascii_digit());
+    let is_letter = label_len == 1 && label.as_bytes()[0].is_ascii_alphabetic();
+    if ((is_number || is_letter) && followed_by(b')')) || (is_roman(label) && (followed_by(b'.') || followed_by(b')'))) {
+        return label_len + 2;
+    }
     0
+}
+
+/// Returns `true` if `s` is a Roman numeral in canonical form (e.g. `iv`, `XII`), written entirely in uppercase or entirely in
+/// lowercase. Non-canonical forms such as `iiii` or `ic` are rejected, which keeps words like `did` or `mid` from matching.
+fn is_roman(s: &str) -> bool {
+    const NUMERALS: [(isize, &str); 13] = [
+        (1000, "M"),
+        (900, "CM"),
+        (500, "D"),
+        (400, "CD"),
+        (100, "C"),
+        (90, "XC"),
+        (50, "L"),
+        (40, "XL"),
+        (10, "X"),
+        (9, "IX"),
+        (5, "V"),
+        (4, "IV"),
+        (1, "I"),
+    ];
+    if s.is_empty() || !(s.bytes().all(|b| b.is_ascii_uppercase()) || s.bytes().all(|b| b.is_ascii_lowercase())) {
+        return false;
+    }
+    let upper = s.to_ascii_uppercase();
+    let digit = |c: char| {
+        NUMERALS
+            .iter()
+            .find(|(_, n)| n.len() == 1 && n.starts_with(c))
+            .map(|&(v, _)| v)
+    };
+    let Some(values) = upper.chars().map(digit).collect::<Option<Vec<_>>>() else {
+        return false;
+    };
+    let mut value = 0;
+    for (i, &v) in values.iter().enumerate() {
+        if values.get(i + 1).is_some_and(|&next| next > v) {
+            value -= v;
+        } else {
+            value += v;
+        }
+    }
+    let mut canonical = String::new();
+    for (v, numeral) in NUMERALS {
+        while value >= v {
+            canonical.push_str(numeral);
+            value -= v;
+        }
+    }
+    canonical == upper
 }
 
 /// Returns `true` if `text` is a divider: four or more repetitions of a single punctuation character (e.g. `----`, `=====`,
@@ -231,26 +320,79 @@ fn starts_with_annotation_tag(text: &str) -> bool {
     })
 }
 
+/// Splits a markdown block quote prefix off `text`: one or more `>`, each preceded by up to three spaces and optionally followed
+/// by one space (e.g. `> `, `> > `, `>>`).
+///
+/// Returns the prefix, the quote depth (the number of `>`), and the text after the prefix.
+fn split_quote(text: &str) -> (&str, usize, &str) {
+    let mut depth = 0;
+    let mut end = 0;
+    loop {
+        let rest = &text[end..];
+        let unindented = rest.trim_start_matches(' ');
+        if rest.len() - unindented.len() > 3 {
+            break;
+        }
+        let Some(after) = unindented.strip_prefix('>') else {
+            break;
+        };
+        depth += 1;
+        end = text.len() - after.strip_prefix(' ').unwrap_or(after).len();
+    }
+    (&text[..end], depth, &text[end..])
+}
+
+/// Returns `true` if `text` is a markdown table row (its trimmed text starts with `|`).
+fn is_table_row(text: &str) -> bool {
+    text.trim_start().starts_with('|')
+}
+
+/// Returns `true` if `text` ends with an unescaped backslash, which is a markdown hard line break at the end of a line.
+fn ends_with_backslash_break(text: &str) -> bool {
+    text.bytes().rev().take_while(|&b| b == b'\\').count() % 2 == 1
+}
+
+/// Returns the trailing spaces of `text` if there are two or more, which is a markdown hard line break at the end of a line.
+/// Otherwise, returns an empty string.
+fn trailing_space_break(text: &str) -> &str {
+    let trimmed = text.trim_end_matches(' ');
+    if text.len() - trimmed.len() >= 2 {
+        &text[trimmed.len()..]
+    } else {
+        ""
+    }
+}
+
 /// Determines whether two adjacent comment lines should be combined.
 ///
-/// Lines are combined when they share the same marker and indentation, neither is blank, a divider, a thematic break, or an SPDX
-/// tag, the next line doesn't start with a hierarchical marker or an annotation tag, the current line doesn't contain a code
-/// fence, and a markdown heading line (starting with `#`) is not combined with the text that follows.
+/// Lines are combined when they share the same marker, indentation, and block quote depth, and the following rules hold for the
+/// text after any block quote prefix: neither is blank, a divider, a thematic break, a table row, or an SPDX tag, the next line
+/// doesn't start with a hierarchical marker or an annotation tag, the current line doesn't start with or contain a code fence or
+/// end with a hard line break (a backslash or two or more spaces), and a markdown heading line (starting with `#`) is not combined
+/// with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
+    let (_, current_depth, current_text) = split_quote(&current.text);
+    let (_, next_depth, next_text) = split_quote(&next.text);
     current.marker == next.marker
         && current.indent == next.indent
-        && !current.text.is_empty()
-        && !next.text.is_empty()
-        && !is_divider(&current.text)
-        && !is_divider(&next.text)
-        && !is_thematic_break(&current.text)
-        && !is_thematic_break(&next.text)
-        && !is_spdx_line(&current.text)
-        && !is_spdx_line(&next.text)
-        && !starts_with_annotation_tag(&next.text)
-        && !starts_with_hierarchical_marker(&next.text)
-        && !current.text.contains("```")
-        && !current.text.starts_with('#')
+        && current_depth == next_depth
+        && !current_text.is_empty()
+        && !next_text.is_empty()
+        && !ends_with_backslash_break(current_text)
+        && trailing_space_break(current_text).is_empty()
+        && !is_divider(current_text)
+        && !is_divider(next_text)
+        && !is_thematic_break(current_text)
+        && !is_thematic_break(next_text)
+        && !is_table_row(current_text)
+        && !is_table_row(next_text)
+        && !is_spdx_line(current_text)
+        && !is_spdx_line(next_text)
+        && !starts_with_annotation_tag(next_text)
+        && !starts_with_hierarchical_marker(next_text)
+        && !current_text.contains("```")
+        && code_fence(current_text).is_none()
+        && !current_text.starts_with('#')
 }
 
 /// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or ` `` ` as single tokens even if
@@ -308,9 +450,20 @@ fn tokenize_preserving_backticks(text: &str) -> Vec<String> {
 ///
 /// The first output line is prefixed with `prefix` (typically indent + marker + space). Continuation lines use
 /// `continuation_prefix`, which may include extra indentation to align with text after a hierarchical marker. Words that exceed the
-/// available width are emitted on their own line without truncation. Backtick-delimited spans are kept on the same line.
+/// available width are emitted on their own line without truncation. Backtick-delimited spans are kept on the same line, and a word
+/// ending in a backslash is kept on the same line as the word after it.
 fn wrap_text(text: &str, prefix: &str, continuation_prefix: &str, max_width: usize) -> Vec<String> {
-    let words = tokenize_preserving_backticks(text);
+    let mut words: Vec<String> = Vec::new();
+    for token in tokenize_preserving_backticks(text) {
+        match words.last_mut() {
+            // A backslash at the end of an output line would be a hard line break that was not in the input.
+            Some(last) if ends_with_backslash_break(last) => {
+                last.push(' ');
+                last.push_str(&token);
+            }
+            _ => words.push(token),
+        }
+    }
     if words.is_empty() {
         return vec![prefix.trim_end().to_string()];
     }
@@ -357,27 +510,96 @@ fn print_changes(changes: &[Change], header: Option<&str>) {
     }
 }
 
+/// Returns the indentation of `text` in columns, with tabs advancing to the next multiple of 4 as in CommonMark.
+fn leading_indent(text: &str) -> usize {
+    let mut width = 0;
+    for c in text.chars() {
+        match c {
+            ' ' => width += 1,
+            '\t' => width += 4 - width % 4,
+            _ => break,
+        }
+    }
+    width
+}
+
+/// Returns the column at which the content of a list item starts (e.g. `  - item` → 4), or `None` if `text` is not a list item.
+fn list_content_column(text: &str) -> Option<usize> {
+    let body = text.trim_start();
+    if body.starts_with('#') {
+        return None;
+    }
+    match hierarchical_marker_width(body) {
+        0 => None,
+        width => Some(leading_indent(text) + width),
+    }
+}
+
 /// Processes an entire file's content, combining and wrapping comments.
 ///
 /// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
-/// (`` ``` ``) are passed through unchanged.
+/// (`` ``` `` or `~~~` fences, or CommonMark indented code blocks) are passed through unchanged.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
     let mut result: Vec<String> = Vec::new();
     let mut changes: Vec<Change> = Vec::new();
     let mut i = 0;
-    let mut in_code_block = false;
+    // The opening fence of the code block being passed through, if any.
+    let mut open_fence: Option<(char, usize)> = None;
+    let mut in_indented_code = false;
+    // The indent and marker of the previous line if it is a comment, and whether its text is blank.
+    let mut prev: Option<(String, String, bool)> = None;
+    // Where the content of the most recent list item in the comment block starts. Indented code inside the item is indented 4
+    // columns past it.
+    let mut list_column: Option<usize> = None;
 
     while i < lines.len() {
         let comment = parse_comment_line(lines[i]);
 
-        if let Some(ref c) = comment
-            && c.text.trim_start().starts_with("```")
-        {
-            in_code_block = !in_code_block;
+        if let Some(ref c) = comment {
+            let same_block = prev
+                .as_ref()
+                .is_some_and(|(indent, marker, _)| *indent == c.indent && *marker == c.marker);
+            if !same_block {
+                list_column = None;
+            }
+            let blank = c.text.trim().is_empty();
+            let indent = leading_indent(&c.text);
+            let code_indent = list_column.unwrap_or(0) + 4;
+            if in_indented_code && (!same_block || (!blank && indent < code_indent)) {
+                in_indented_code = false;
+            }
+            // An indented code block cannot interrupt a paragraph, so it starts only after a blank line or at the block start.
+            let prev_blank = prev.as_ref().is_none_or(|(_, _, blank)| *blank);
+            if open_fence.is_none() && !blank && indent >= code_indent && (!same_block || prev_blank) {
+                in_indented_code = true;
+            }
+            prev = Some((c.indent.clone(), c.marker.clone(), blank));
+
+            if in_indented_code {
+                if !blank {
+                    result.push(lines[i].to_string());
+                    i += 1;
+                    continue;
+                }
+            } else {
+                match open_fence {
+                    Some(open) if closes_code_fence(&c.text, open) => open_fence = None,
+                    Some(_) => {}
+                    None => open_fence = code_fence(&c.text),
+                }
+            }
+        } else {
+            prev = None;
+            in_indented_code = false;
         }
 
-        let passthrough = in_code_block || comment.as_ref().is_none_or(|c| is_spdx_line(&c.text));
+        // Table rows and SPDX lines are never combined or wrapped, even when wider than `max_width`.
+        let passthrough = open_fence.is_some()
+            || comment.as_ref().is_none_or(|c| {
+                let text = split_quote(&c.text).2;
+                is_table_row(text) || is_spdx_line(text)
+            });
         if passthrough {
             result.push(lines[i].to_string());
             i += 1;
@@ -385,6 +607,11 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         }
 
         let comment = comment.unwrap();
+        if let Some(column) = list_content_column(&comment.text) {
+            list_column = Some(column);
+        } else if list_column.is_some_and(|column| !comment.text.trim().is_empty() && leading_indent(&comment.text) < column) {
+            list_column = None;
+        }
 
         let mut combined_text = comment.text.clone();
         let start_line = i;
@@ -400,7 +627,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
                 };
                 if can_combine(&current, &next_comment) {
                     combined_text.push(' ');
-                    combined_text.push_str(next_comment.text.trim_start());
+                    combined_text.push_str(split_quote(&next_comment.text).2.trim_start());
                     orig_lines.push(lines[j].to_string());
                     j += 1;
                     continue;
@@ -409,25 +636,32 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
             break;
         }
 
-        let base = format!("{}{}", comment.indent, comment.marker);
-        let prefix = if combined_text.is_empty() {
-            base.clone()
+        // A hard line break made of trailing spaces is set aside so that trimming doesn't remove it, and is put back at the end.
+        let hard_break = if split_quote(&combined_text).2.trim().is_empty() {
+            ""
         } else {
-            format!("{base} ")
+            trailing_space_break(&combined_text)
         };
-        let full_line = format!("{prefix}{combined_text}");
+        let text = &combined_text[..combined_text.len() - hard_break.len()];
 
-        let new_lines = if combined_text.is_empty() {
+        let base = format!("{}{}", comment.indent, comment.marker);
+        let prefix = if text.is_empty() { base.clone() } else { format!("{base} ") };
+        let full_line = format!("{prefix}{text}");
+
+        let mut new_lines = if text.is_empty() {
             vec![base.trim_end().to_string()]
         } else if full_line.len() > max_width {
-            // Leading spaces nest the text (e.g. a sub-list item), so every wrapped line keeps them.
-            let body = combined_text.trim_start();
-            let first = format!("{prefix}{}", &combined_text[..combined_text.len() - body.len()]);
+            // A block quote prefix and leading spaces (e.g. a sub-list item) nest the text, so every wrapped line keeps them.
+            let body = split_quote(text).2.trim_start();
+            let first = format!("{prefix}{}", &text[..text.len() - body.len()]);
             let cont = format!("{first}{}", " ".repeat(hierarchical_marker_width(body)));
             wrap_text(body, &first, &cont, max_width)
         } else {
             vec![full_line.trim_end().to_string()]
         };
+        if let Some(last) = new_lines.last_mut() {
+            last.push_str(hard_break);
+        }
 
         if new_lines != orig_lines {
             changes.push((start_line + 1, orig_lines, new_lines.clone()));
@@ -779,6 +1013,7 @@ mod tests {
         assert!(starts_with_hierarchical_marker("A. lettered"));
         assert!(starts_with_hierarchical_marker("a. lower"));
         assert!(starts_with_hierarchical_marker("```code"));
+        assert!(starts_with_hierarchical_marker("~~~"));
         assert!(!starts_with_hierarchical_marker("normal text"));
     }
 
@@ -964,6 +1199,165 @@ mod tests {
     }
 
     #[test]
+    fn test_tagged_lines_in_quote() {
+        let input = "// > text\n// > TODO: note\n// > SPDX-License-Identifier: MIT OR Apache-2.0\n// > more\n";
+        let (output, changes) = process_content(input, 30);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+        let input = "// > text\n// > TODO: note\n// > continues\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// > text\n// > TODO: note continues\n");
+    }
+
+    #[test]
+    fn test_tagged_lines_with_hard_breaks_and_code() {
+        // A hard break ends a tagged line, and tags inside code blocks are passed through.
+        let input = "// TODO: one  \n// two\n// ~~~\n// text\n// SPDX-License-Identifier: MIT OR Apache-2.0 WITH LLVM-exception\n// ~~~\n//\n//     text\n//     FIXME: in code\n";
+        let (output, changes) = process_content(input, 40);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_split_quote() {
+        assert_eq!(split_quote("> text"), ("> ", 1, "text"));
+        assert_eq!(split_quote(">text"), (">", 1, "text"));
+        assert_eq!(split_quote("> > text"), ("> > ", 2, "text"));
+        assert_eq!(split_quote(">> text"), (">> ", 2, "text"));
+        assert_eq!(split_quote("   > text"), ("   > ", 1, "text"));
+        assert_eq!(split_quote(">"), (">", 1, ""));
+        assert_eq!(split_quote("    > code"), ("", 0, "    > code"));
+        assert_eq!(split_quote("  text"), ("", 0, "  text"));
+        assert_eq!(split_quote("a > b"), ("", 0, "a > b"));
+    }
+
+    #[test]
+    fn test_combine_and_wrap_block_quote() {
+        let input = "/// > **Note:** The iterator borrows the buffer, so the buffer cannot be modified while the iterator is alive. This is enforced by the borrow checker,\n/// > and the quoted text is split across two lines that both begin with `>`.\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "/// > **Note:** The iterator borrows the buffer, so the buffer cannot be modified while the iterator is alive. This is enforced by\n/// > the borrow checker, and the quoted text is split across two lines that both begin with `>`.\n"
+        );
+        let (again, changes) = process_content(&output, 132);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_different_quote_depths() {
+        let input = "// text\n// > quoted\n// > > nested\n// > quoted again\n// text again\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_blank_quote_line() {
+        let input = "// > one\n// >\n// > two\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_quote_applies_rules_after_prefix() {
+        let input = "// > text\n// > - item\n// > # Heading\n// > more\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_list_item_in_quote() {
+        let input = "// > - aaa bbb ccc ddd\n";
+        let (output, _) = process_content(input, 20);
+        assert_eq!(output, "// > - aaa bbb ccc\n// >   ddd\n");
+    }
+
+    #[test]
+    fn test_hard_line_breaks_in_quote() {
+        let input = "// > one\\\n// > two\n// > three  \n// > four\n// > five\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// > one\\\n// > two three  \n// > four five\n");
+    }
+
+    #[test]
+    fn test_wrap_quote_keeps_trailing_space_break_on_last_line() {
+        let input = "// > aaa bbb ccc ddd  \n// > eee\n";
+        let (output, _) = process_content(input, 14);
+        assert_eq!(output, "// > aaa bbb\n// > ccc ddd  \n// > eee\n");
+        let (again, changes) = process_content(&output, 14);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_blank_quote_line_with_trailing_spaces_is_trimmed() {
+        let (output, _) = process_content("// >   \n", 80);
+        assert_eq!(output, "// >\n");
+    }
+
+    #[test]
+    fn test_table_rows_in_quote_pass_through() {
+        let input = "// > text\n// > | a | b |\n// > | - | - |\n// > more\n// > text\n";
+        let (output, _) = process_content(input, 12);
+        assert_eq!(output, "// > text\n// > | a | b |\n// > | - | - |\n// > more\n// > text\n");
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// > text\n// > | a | b |\n// > | - | - |\n// > more text\n");
+    }
+
+    #[test]
+    fn test_no_combine_tilde_fence_in_quote() {
+        let input = "// > text\n// > ~~~\n// > more\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_is_table_row() {
+        assert!(is_table_row("| a | b |"));
+        assert!(is_table_row("  | --- | :---: |"));
+        assert!(is_table_row("|"));
+        assert!(!is_table_row("a | b"));
+        assert!(!is_table_row(""));
+    }
+
+    #[test]
+    fn test_table_rows_pass_through() {
+        let input = "\
+/// Types that can be emptied in a single call.
+///
+/// | Implementor       | Order            | Notes                                                                                                         |
+/// | ----------------- | ---------------- | ------------------------------------------------------------------------------------------------------------- |
+/// | [`RingBuffer<T>`] | oldest to newest | The only implementor in this file. The table row is longer than the configured width and must not be wrapped. |
+pub trait Drain {
+";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_combine_table_with_surrounding_text() {
+        let input = "// text before\n// | a | b |\n// | - | - |\n// text after\n// more\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// text before\n// | a | b |\n// | - | - |\n// text after more\n");
+    }
+
+    #[test]
+    fn test_table_rows_with_hard_breaks_and_tilde_fences() {
+        // Table rows keep trailing backslashes and spaces, and a table inside a tilde fence doesn't end the code block.
+        let input = "// text\\\n// | a | b |  \n// | - | - |\\\n// ~~~\n// | c | d |\n// one\n// two\n// ~~~\n// three\n// four\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// text\\\n// | a | b |  \n// | - | - |\\\n// ~~~\n// | c | d |\n// one\n// two\n// ~~~\n// three four\n"
+        );
+    }
+
+    #[test]
     fn test_no_combine_divider_with_previous() {
         let input = "// some text\n// ==========\n";
         let (output, changes) = process_content(input, 132);
@@ -1026,6 +1420,93 @@ mod tests {
         let (output, changes) = process_content(input, 100);
         assert_eq!(output, input);
         assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_code_block_not_wrapped() {
+        let input = "    /// The result is `(sum2 << 8) | sum1`.\n    ///\n    ///     This line is an indented code block, because it is indented by four spaces and preceded by a blank line. It must not be wrapped or combined.\n    ///\n    /// [Fletcher-16]: https://en.wikipedia.org/wiki/Fletcher%27s_checksum#Fletcher-16\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_code_block_not_combined() {
+        let input = "///\n///     let a = 1;\n///     let b = 2;\n///\n///     let c = 3;\n/// Text after the code block.\n/// More text.\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "///\n///     let a = 1;\n///     let b = 2;\n///\n///     let c = 3;\n/// Text after the code block. More text.\n"
+        );
+    }
+
+    #[test]
+    fn test_indented_code_block_at_block_start() {
+        let input = "fn f() {}\n///     let a = 1;\n///     let b = 2;\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_indented_line_after_text_is_not_code() {
+        // An indented code block cannot interrupt a paragraph.
+        let input = "/// text\n///     more text\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "/// text more text\n");
+    }
+
+    #[test]
+    fn test_indented_code_block_in_list_item() {
+        // Inside a list item, code is indented 4 columns past the start of the item's content.
+        let input = "/// - item\n///\n///     nested paragraph\n///     continued\n///\n///       code a\n///       code b\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "/// - item\n///\n///     nested paragraph continued\n///\n///       code a\n///       code b\n"
+        );
+    }
+
+    #[test]
+    fn test_indented_fence_inside_indented_code_block() {
+        let input = "///\n///     ```\n///     code\n/// text\n/// more\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "///\n///     ```\n///     code\n/// text more\n");
+    }
+
+    #[test]
+    fn test_indented_tilde_fence_inside_indented_code_block() {
+        let input = "///\n///     ~~~\n///     code\n/// text\n/// more\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "///\n///     ~~~\n///     code\n/// text more\n");
+    }
+
+    #[test]
+    fn test_indented_line_inside_tilde_fence_does_not_start_indented_code() {
+        let input = "// ~~~\n//\n//     code\n// ~~~\n// a\n// b\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(output, "// ~~~\n//\n//     code\n// ~~~\n// a b\n");
+    }
+
+    #[test]
+    fn test_indented_code_block_keeps_hard_breaks_tables_and_quotes() {
+        // Code lines that look like hard breaks, table rows, or block quotes are passed through, and text after the block still
+        // honors a hard line break.
+        let input = "///\n///     let a = 1; \\\n///     | x |  \n///     > not a quote, but a long code line that is wider than the width\n/// one\\\n/// two\n/// three\n";
+        let (output, _) = process_content(input, 40);
+        assert_eq!(
+            output,
+            "///\n///     let a = 1; \\\n///     | x |  \n///     > not a quote, but a long code line that is wider than the width\n/// one\\\n/// two three\n"
+        );
+    }
+
+    #[test]
+    fn test_leading_indent() {
+        assert_eq!(leading_indent("text"), 0);
+        assert_eq!(leading_indent("    text"), 4);
+        assert_eq!(leading_indent("\ttext"), 4);
+        assert_eq!(leading_indent("  \ttext"), 4);
+        assert_eq!(leading_indent("   "), 3);
     }
 
     /// Creates `project/src`, `home`, and `config/rustfmt` under a temporary root.
@@ -1194,6 +1675,56 @@ mod tests {
     }
 
     #[test]
+    fn test_code_fence() {
+        assert_eq!(code_fence("```"), Some(('`', 3)));
+        assert_eq!(code_fence("```rust"), Some(('`', 3)));
+        assert_eq!(code_fence("  ~~~~"), Some(('~', 4)));
+        assert_eq!(code_fence("~~"), None);
+        assert_eq!(code_fence("``"), None);
+        assert_eq!(code_fence("text ```"), None);
+        assert!(closes_code_fence("~~~", ('~', 3)));
+        assert!(closes_code_fence("~~~~~  ", ('~', 3)));
+        assert!(!closes_code_fence("~~~", ('~', 4)));
+        assert!(!closes_code_fence("```", ('~', 3)));
+        assert!(!closes_code_fence("~~~ rust", ('~', 3)));
+    }
+
+    #[test]
+    fn test_no_wrap_or_combine_inside_tilde_fence() {
+        let input = "    /// ~~~\n    /// # use ring_buffer::{Drain, RingBuffer};\n    /// let mut buffer = RingBuffer::with_capacity(3).unwrap();\n    /// buffer.push(\"x\").unwrap();\n    /// assert_eq!(buffer.drain_all(), [\"x\"]); // a long trailing comment that is much wider than the configured width\n    /// ~~~\n";
+        let (output, changes) = process_content(input, 60);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_no_wrap_inside_tilde_fence_plain_comment() {
+        let input = "// ~~~\n// Tilde fence in a plain comment, followed by a very long line.\n// ~~~\n";
+        let (output, changes) = process_content(input, 40);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_fence_closed_only_by_matching_fence() {
+        // A backtick fence and a shorter tilde fence do not close a `~~~~` block.
+        let input = "// ~~~~\n// ```\n// ~~~\n// one\n// two\n// ~~~~\n// hello\n// world\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// ~~~~\n// ```\n// ~~~\n// one\n// two\n// ~~~~\n// hello world\n");
+    }
+
+    #[test]
+    fn test_hard_line_breaks_around_tilde_fence() {
+        // Hard breaks inside the block are passed through, and a closing fence with trailing spaces still closes it.
+        let input = "// one\\\n// ~~~\n// a very long line inside the fence that is wider than the width\\\n// b  \n// ~~~  \n// two\n// three\n";
+        let (output, _) = process_content(input, 40);
+        assert_eq!(
+            output,
+            "// one\\\n// ~~~\n// a very long line inside the fence that is wider than the width\\\n// b  \n// ~~~  \n// two three\n"
+        );
+    }
+
+    #[test]
     fn test_hierarchical_marker_width() {
         assert_eq!(hierarchical_marker_width("- item"), 2);
         assert_eq!(hierarchical_marker_width("* item"), 2);
@@ -1206,6 +1737,83 @@ mod tests {
         assert_eq!(hierarchical_marker_width("```code"), 0);
         assert_eq!(hierarchical_marker_width("10. item"), 4);
         assert_eq!(hierarchical_marker_width("100. item"), 5);
+    }
+
+    #[test]
+    fn test_is_roman() {
+        for s in ["i", "ii", "iv", "ix", "xii", "XII", "MCMXCIX", "civ"] {
+            assert!(is_roman(s), "{s}");
+        }
+        for s in ["", "iiii", "ic", "Ii", "etc", "eg", "did", "mid", "vx"] {
+            assert!(!is_roman(s), "{s}");
+        }
+    }
+
+    #[test]
+    fn test_spaced_list_markers() {
+        assert!(starts_with_hierarchical_marker("+ plus"));
+        assert!(starts_with_hierarchical_marker("1) first"));
+        assert!(starts_with_hierarchical_marker("10) tenth"));
+        assert!(starts_with_hierarchical_marker("a) letter"));
+        assert!(starts_with_hierarchical_marker("ii. second"));
+        assert!(starts_with_hierarchical_marker("iv) fourth"));
+        assert!(starts_with_hierarchical_marker("XII. twelfth"));
+        assert!(!starts_with_hierarchical_marker("+1 is positive"));
+        assert!(!starts_with_hierarchical_marker("1)no space"));
+        assert!(!starts_with_hierarchical_marker("etc. and so on"));
+        assert!(!starts_with_hierarchical_marker("ab) not a marker"));
+        assert!(!starts_with_hierarchical_marker("iiii. not canonical"));
+        assert_eq!(hierarchical_marker_width("+ plus"), 2);
+        assert_eq!(hierarchical_marker_width("1) first"), 3);
+        assert_eq!(hierarchical_marker_width("10) tenth"), 4);
+        assert_eq!(hierarchical_marker_width("a) letter"), 3);
+        assert_eq!(hierarchical_marker_width("ii. second"), 4);
+        assert_eq!(hierarchical_marker_width("XII) twelfth"), 5);
+        assert_eq!(hierarchical_marker_width("etc. and so on"), 0);
+    }
+
+    #[test]
+    fn test_no_combine_spaced_list_markers() {
+        let input = "// I. Roman numerals are sometimes used for lists.\n// ii. Second roman item.\n// + Plus signs are valid CommonMark bullets too.\n// + Second plus-sign bullet.\n// 1) Parenthesized ordered list markers are also valid CommonMark.\n// 2) Second item.\n";
+        let (output, changes) = process_content(input, 80);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_spaced_list_markers_with_indent() {
+        let input = "// ii. A roman item that is long enough to wrap\n// 12) A numbered item that is long enough to wrap\n// + A plus item that is long enough to wrap\n";
+        let (output, _) = process_content(input, 32);
+        assert_eq!(
+            output,
+            "// ii. A roman item that is long\n//     enough to wrap\n// 12) A numbered item that is\n//     long enough to wrap\n// + A plus item that is long\n//   enough to wrap\n"
+        );
+    }
+
+    #[test]
+    fn test_spaced_list_markers_in_quote() {
+        let input = "// > + one\n// > + two\n// > 1) three\n// > iv. four\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+        let (output, _) = process_content("// > ii. aaa bbb ccc ddd\n", 20);
+        assert_eq!(output, "// > ii. aaa bbb ccc\n// >     ddd\n");
+    }
+
+    #[test]
+    fn test_indented_code_block_in_spaced_list_item() {
+        // Inside a `ii.` item, content starts at column 4, so code is indented 8 columns.
+        let input = "/// ii. item\n///\n///     nested paragraph\n///     continued\n///\n///         code a\n///         code b\n";
+        let (output, _) = process_content(input, 100);
+        assert_eq!(
+            output,
+            "/// ii. item\n///\n///     nested paragraph continued\n///\n///         code a\n///         code b\n"
+        );
+        // A `+` item's content starts at column 2, so a line indented 6 columns is code.
+        let input = "/// + item\n///\n///       code a\n///       code b\n";
+        let (output, changes) = process_content(input, 100);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
     }
 
     #[test]
@@ -1313,6 +1921,68 @@ mod tests {
         for line in output.lines() {
             assert_eq!(line, line.trim_end(), "trailing spaces in: {:?}", line);
         }
+    }
+
+    #[test]
+    fn test_ends_with_backslash_break() {
+        assert!(ends_with_backslash_break("text\\"));
+        assert!(ends_with_backslash_break("text\\\\\\"));
+        assert!(!ends_with_backslash_break("text\\\\"));
+        assert!(!ends_with_backslash_break("text\\ "));
+        assert!(!ends_with_backslash_break("text"));
+    }
+
+    #[test]
+    fn test_trailing_space_break() {
+        assert_eq!(trailing_space_break("text  "), "  ");
+        assert_eq!(trailing_space_break("text   "), "   ");
+        assert_eq!(trailing_space_break("text "), "");
+        assert_eq!(trailing_space_break("text"), "");
+    }
+
+    #[test]
+    fn test_no_combine_hard_line_break() {
+        let input =
+            "/// Line one ends with a backslash\\\n/// line two.\n///\n/// Line three ends with two spaces  \n/// line four.\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_hard_line_break_ends_run() {
+        let input = "// one\n// two\\\n// three\n// four  \n// five\n// six\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// one two\\\n// three four  \n// five six\n");
+    }
+
+    #[test]
+    fn test_wrap_keeps_trailing_space_break_on_last_line() {
+        let input = "// aaa bbb ccc ddd  \n// eee\n";
+        let (output, _) = process_content(input, 12);
+        assert_eq!(output, "// aaa bbb\n// ccc ddd  \n// eee\n");
+        let (again, changes) = process_content(&output, 12);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_wrap_keeps_backslash_break_on_last_line() {
+        let input = "// aaa bbb ccc ddd\\\n// eee\n";
+        let (output, _) = process_content(input, 12);
+        assert_eq!(output, "// aaa bbb\n// ccc ddd\\\n// eee\n");
+    }
+
+    #[test]
+    fn test_wrap_does_not_end_line_with_backslash() {
+        let result = wrap_text("aaa bbb\\ ccc ddd", "// ", "// ", 12);
+        assert_eq!(result, vec!["// aaa", "// bbb\\ ccc", "// ddd"]);
+    }
+
+    #[test]
+    fn test_blank_comment_with_trailing_spaces_is_trimmed() {
+        let (output, _) = process_content("//   \n", 80);
+        assert_eq!(output, "//\n");
     }
 
     #[test]
