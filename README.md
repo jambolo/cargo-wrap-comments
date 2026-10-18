@@ -10,10 +10,13 @@ A Rust command-line tool that formats source code comments to wrap long lines at
 - Wraps long comments to a configurable width (default: 100 columns), measured in display columns as rustfmt measures it
 - Reads `max_width` from the rustfmt config file, located exactly as rustfmt locates it, if `--max-width` is not specified
 - Combines consecutive comment lines before wrapping
-- Supports Rust comment styles: `//`, `///`, `//!`, and block doc comments (`/** */`, `/*! */`)
-- Block doc comments are wrapped using the leading ` * ` of their lines, or their common indentation if the lines have no leading
-  asterisks, as the line prefix. Their opening and closing lines, one-line block doc comments, and plain block comments
-  (`/* */`) are left unchanged.
+- Supports Rust comment styles: `//`, `///`, `//!`, and block comments (`/* */`, `/** */`, `/*! */`)
+- Multi-line block comments whose opening delimiter is alone on its line are wrapped using the leading ` * ` of their lines, or
+  their common indentation if the lines have no leading asterisks, as the line prefix. Their opening and closing lines are left
+  unchanged.
+- A one-line block comment wider than the line width is split: the opening and closing delimiters go on their own lines at the
+  original indentation, and the text is wrapped between them at that indentation. Block comments that share a line with code,
+  and lines that contain a nested block comment delimiter, are left unchanged.
 - Preserves indentation, comment markers, the spacing after the marker, and blank comment lines
 - Leaves lines that are not combined or wrapped exactly as they are, except that trailing whitespace is removed from blank comment
   lines
@@ -85,7 +88,7 @@ cargo wrap-comments < src/main.rs
 
 Consecutive comment lines are combined before wrapping when ALL of these are true:
 
-1. Same comment marker (`//`, `///`, `//!`, a run of four or more slashes, which is a plain comment, or the ` * ` prefix in a block doc comment)
+1. Same comment marker (`//`, `///`, `//!`, a run of four or more slashes, which is a plain comment, or the ` * ` prefix in a block comment)
 2. Same indentation level
 3. Same block quote depth (the number of leading `>`). The rules below apply to the text after the `>` prefix, and the prefix is repeated on every wrapped line.
 4. Neither line is blank

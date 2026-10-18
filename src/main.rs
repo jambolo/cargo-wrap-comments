@@ -1,7 +1,8 @@
 //! A CLI tool that reformats source code comments to wrap at a specified width.
 //!
 //! `cargo-wrap-comments` combines consecutive comment lines and re-wraps them to fit within a configurable line width, similar to
-//! what `rustfmt` does for code but applied to `//`, `///`, and `//!` comments and to block doc comments (`/** */` and `/*! */`).
+//! what `rustfmt` does for code but applied to `//`, `///`, and `//!` comments and to block comments (`/* */`, `/** */`, and
+//! `/*! */`).
 //!
 //! # Usage
 //!
@@ -92,7 +93,7 @@ struct Cli {
 struct CommentLine {
     /// Leading whitespace before the comment marker.
     indent: String,
-    /// The comment marker (`//`, `///`, `//!`, or a run of four or more slashes), or, in the body of a block doc comment, `*`
+    /// The comment marker (`//`, `///`, `//!`, or a run of four or more slashes), or, in the body of a block comment, `*`
     /// (leading-asterisk style) or the empty string (no-asterisk style).
     marker: String,
     /// Whether a space follows the marker. Always `false` for an empty marker.
@@ -153,21 +154,42 @@ fn block_comment_depth(line: &str, mut depth: usize) -> usize {
     depth
 }
 
-/// Returns `true` if `trimmed` opens a multi-line block doc comment: `/**` or `/*!` with nothing after it. `/***` and `/**/` are
-/// plain block comments.
-fn is_block_doc_opener(trimmed: &str) -> bool {
-    trimmed
-        .strip_prefix("/**")
-        .or_else(|| trimmed.strip_prefix("/*!"))
+/// Returns `true` if `trimmed` opens a multi-line block comment whose body is wrapped: `/*`, `/**`, or `/*!` with nothing after
+/// it. `/***` (often a banner) and `/**/` are not.
+fn is_block_opener(trimmed: &str) -> bool {
+    ["/**", "/*!", "/*"]
+        .iter()
+        .find_map(|opener| trimmed.strip_prefix(opener))
         .is_some_and(|rest| rest.trim().is_empty())
 }
 
-/// Parses the lines between the opening and closing lines of a block doc comment.
+/// Splits a line that holds only a block comment opening and closing on that line (e.g. `    /** text */`) into its indentation,
+/// opening delimiter (`/*`, `/**`, or `/*!`), and text.
+///
+/// Returns `None` if the line holds anything else, if the text is empty, starts with `*` (e.g. `/*** banner ***/`), or contains a
+/// nested block comment delimiter.
+fn parse_one_line_block(line: &str) -> Option<Parsed> {
+    let trimmed = line.trim();
+    let indent = &line[..line.len() - line.trim_start().len()];
+    let opener = ["/**", "/*!", "/*"].into_iter().find(|opener| trimmed.starts_with(opener))?;
+    let inner = trimmed.get(opener.len()..)?.strip_suffix("*/")?;
+    let text = inner.trim();
+    if text.is_empty() || inner.starts_with('*') || text.contains("/*") || text.contains("*/") {
+        return None;
+    }
+    Some(Parsed::OneLineBlock {
+        indent: indent.to_string(),
+        opener,
+        text: text.to_string(),
+    })
+}
+
+/// Parses the lines between the opening and closing lines of a block comment.
 ///
 /// If every non-blank line starts with `*` followed by a space or the end of the line, the `*` is the marker. Otherwise the
 /// common leading whitespace is the indent and the marker is empty. Blank lines and lines containing a nested block comment
 /// delimiter are not parsed.
-fn parse_block_doc_body(body: &[&str]) -> Vec<Option<CommentLine>> {
+fn parse_block_body(body: &[&str]) -> Vec<Option<CommentLine>> {
     let text_lines = || body.iter().filter(|line| !line.trim().is_empty());
     let asterisk = text_lines().all(|line| {
         let t = line.trim_start();
@@ -204,18 +226,43 @@ fn parse_block_doc_body(body: &[&str]) -> Vec<Option<CommentLine>> {
         .collect()
 }
 
-/// Parses every line into a [`CommentLine`], or `None` if the line is passed through unchanged.
+/// How [`process_content`] treats a source line.
+#[derive(Debug)]
+enum Parsed {
+    /// A comment line, which may be combined and wrapped.
+    Comment(CommentLine),
+    /// A line holding only a block comment that opens and closes on it, which is split onto several lines if it is too wide.
+    OneLineBlock {
+        indent: String,
+        /// `/*`, `/**`, or `/*!`.
+        opener: &'static str,
+        text: String,
+    },
+    /// A line that is passed through unchanged.
+    Other,
+}
+
+impl Parsed {
+    fn comment(&self) -> Option<&CommentLine> {
+        match self {
+            Self::Comment(c) => Some(c),
+            _ => None,
+        }
+    }
+}
+
+/// Parses every line.
 ///
 /// A block comment that starts a line is followed to its end (block comments nest), so line comment markers inside it are not
-/// taken for comments. Only the body of a multi-line block doc comment is parsed; its opening and closing lines, and all other
-/// block comments, are passed through.
-fn parse_lines(lines: &[&str]) -> Vec<Option<CommentLine>> {
+/// taken for comments. The body of a multi-line block comment opened by `/*`, `/**`, or `/*!` alone on its line is parsed into
+/// comment lines; its opening and closing lines, and all other multi-line block comments, are passed through.
+fn parse_lines(lines: &[&str]) -> Vec<Parsed> {
     let mut parsed = Vec::with_capacity(lines.len());
     let mut i = 0;
     while i < lines.len() {
         let trimmed = lines[i].trim_start();
         if !trimmed.starts_with("/*") {
-            parsed.push(parse_comment_line(lines[i]));
+            parsed.push(parse_comment_line(lines[i]).map_or(Parsed::Other, Parsed::Comment));
             i += 1;
             continue;
         }
@@ -225,15 +272,21 @@ fn parse_lines(lines: &[&str]) -> Vec<Option<CommentLine>> {
             end += 1;
             depth = block_comment_depth(lines[end], depth);
         }
-        parsed.push(None);
-        if end > i {
+        if end == i {
+            parsed.push(parse_one_line_block(lines[i]).unwrap_or(Parsed::Other));
+        } else {
+            parsed.push(Parsed::Other);
             let body = &lines[i + 1..end];
-            if depth == 0 && is_block_doc_opener(trimmed) {
-                parsed.extend(parse_block_doc_body(body));
+            if depth == 0 && is_block_opener(trimmed) {
+                parsed.extend(
+                    parse_block_body(body)
+                        .into_iter()
+                        .map(|c| c.map_or(Parsed::Other, Parsed::Comment)),
+                );
             } else {
-                parsed.extend(body.iter().map(|_| None));
+                parsed.extend(body.iter().map(|_| Parsed::Other));
             }
-            parsed.push(None);
+            parsed.push(Parsed::Other);
         }
         i = end + 1;
     }
@@ -697,7 +750,8 @@ fn list_content_column(text: &str) -> Option<usize> {
 ///
 /// Returns the reformatted content and a list of [`Change`] tuples describing what was modified. Lines inside code blocks
 /// (`` ``` `` or `~~~` fences, or CommonMark indented code blocks) are passed through unchanged, as are lines that
-/// [`parse_lines`] does not parse.
+/// [`parse_lines`] does not parse. A one-line block comment wider than `max_width` is split into its opening delimiter, its
+/// wrapped text, and its closing delimiter, each on its own line at the original indentation.
 fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let lines: Vec<&str> = content.lines().collect();
     let parsed = parse_lines(&lines);
@@ -714,7 +768,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
     let mut list_column: Option<usize> = None;
 
     while i < lines.len() {
-        let comment = parsed[i].as_ref();
+        let comment = parsed[i].comment();
 
         if let Some(c) = comment {
             let same_block = prev
@@ -752,6 +806,20 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         } else {
             prev = None;
             in_indented_code = false;
+            // A one-line block comment that is too wide gets its delimiters on their own lines and its text wrapped between them.
+            if let Parsed::OneLineBlock { indent, opener, text } = &parsed[i]
+                && open_fence.is_none()
+                && lines[i].trim_end().width() > max_width
+            {
+                let continuation = format!("{indent}{}", " ".repeat(hierarchical_marker_width(text)));
+                let mut new_lines = vec![format!("{indent}{opener}")];
+                new_lines.extend(wrap_text(text, indent, &continuation, max_width));
+                new_lines.push(format!("{indent}*/"));
+                changes.push((i + 1, vec![lines[i].to_string()], new_lines.clone()));
+                result.extend(new_lines);
+                i += 1;
+                continue;
+            }
         }
 
         // Table rows and SPDX lines are never combined or wrapped, even when wider than `max_width`.
@@ -779,7 +847,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
 
         let mut j = i + 1;
         while j < lines.len() {
-            if let Some(next_comment) = &parsed[j] {
+            if let Some(next_comment) = parsed[j].comment() {
                 let current = CommentLine {
                     text: combined_text.clone(),
                     ..comment.clone()
@@ -804,8 +872,8 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         let text = &combined_text[..combined_text.len() - hard_break.len()];
 
         let base = format!("{}{}", comment.indent, comment.marker);
-        // Keep the first line's spacing after the marker, so `//text` does not become `// text`. A block doc comment without
-        // leading asterisks has an empty marker and no space, so its text follows the indent directly.
+        // Keep the first line's spacing after the marker, so `//text` does not become `// text`. A block comment without leading
+        // asterisks has an empty marker and no space, so its text follows the indent directly.
         let prefix = if text.is_empty() || !comment.space {
             base.clone()
         } else {
@@ -1743,9 +1811,27 @@ pub trait Drain {
     }
 
     #[test]
-    fn test_block_doc_one_line_unchanged() {
-        let input = "/** a one-line block doc comment that is longer than the width */\n";
-        let (output, changes) = process_content(input, 20);
+    fn test_plain_and_one_line_block_comments_wrapped() {
+        let input = "/*\n * A plain block comment with asterisks that is long enough to wrap at forty columns.\n * Second line.\n */\n\n/*\n   A plain block comment without asterisks that is long enough to wrap at forty columns.\n   Second line.\n*/\n\n/* A one-line plain block comment that is long enough to wrap at forty columns. */\n\n/** A one-line block doc comment that is long enough to wrap at forty columns. */\n";
+        let expected = "/*\n * A plain block comment with asterisks\n * that is long enough to wrap at forty\n * columns. Second line.\n */\n\n/*\n   A plain block comment without\n   asterisks that is long enough to wrap\n   at forty columns. Second line.\n*/\n\n/*\nA one-line plain block comment that is\nlong enough to wrap at forty columns.\n*/\n\n/**\nA one-line block doc comment that is\nlong enough to wrap at forty columns.\n*/\n";
+        let (output, _) = process_content(input, 40);
+        assert_eq!(output, expected);
+        let (again, changes) = process_content(&output, 40);
+        assert_eq!(again, output);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_one_line_block_comment_keeps_indent() {
+        let (output, _) = process_content("    /*! aaa bbb ccc ddd */\n", 16);
+        assert_eq!(output, "    /*!\n    aaa bbb ccc\n    ddd\n    */\n");
+    }
+
+    #[test]
+    fn test_one_line_block_comment_unchanged() {
+        // It fits, it shares its line with code, it contains a nested delimiter, or it is a banner.
+        let input = "/** a one-line block doc comment that fits */\nlet x = 1; /* a trailing block comment that is wider than the width */\n/* a block comment before some code */ let y = 2;\n/* a /* nested */ block comment that is wider than the width */\n/*** a banner that is wider than the width ***/\n";
+        let (output, changes) = process_content(input, 45);
         assert_eq!(output, input);
         assert!(changes.is_empty());
     }
@@ -1792,21 +1878,23 @@ pub trait Drain {
     }
 
     #[test]
-    fn test_plain_block_comment_unchanged() {
-        let input = "/*\n * aaa bbb ccc ddd eee fff\n * ggg\n// hhh iii jjj kkk\n// lll\n/* /* */ */\n*/\n";
+    fn test_block_comment_with_text_after_opener_unchanged() {
+        // Line comment markers inside the block comment are not comments.
+        let input = "/* aaa\n * bbb ccc ddd eee fff\n * ggg\n// hhh iii jjj kkk\n// lll\n/* /* */ */\n*/\n/***\n * aaa bbb ccc ddd eee\n * fff\n ***/\n";
         let (output, changes) = process_content(input, 12);
         assert_eq!(output, input);
         assert!(changes.is_empty());
     }
 
     #[test]
-    fn test_plain_block_variants_not_doc() {
-        assert!(is_block_doc_opener("/**"));
-        assert!(is_block_doc_opener("/*!  "));
-        assert!(!is_block_doc_opener("/***"));
-        assert!(!is_block_doc_opener("/**/"));
-        assert!(!is_block_doc_opener("/*"));
-        assert!(!is_block_doc_opener("/** text"));
+    fn test_is_block_opener() {
+        assert!(is_block_opener("/**"));
+        assert!(is_block_opener("/*!  "));
+        assert!(is_block_opener("/*"));
+        assert!(!is_block_opener("/***"));
+        assert!(!is_block_opener("/**/"));
+        assert!(!is_block_opener("/** text"));
+        assert!(!is_block_opener("/* text"));
     }
 
     #[test]

@@ -665,11 +665,14 @@ const KNOWN_CHECKSUMS: [(&[u8], u16); 3] = [
 /* A plain block comment on one line. */
 
 /*
- * A plain multi-line block comment with leading asterisks. Only block doc comments are processed by the tool, so this line should remain longer than the configured width.
-// A line comment inside a block comment is part of the block comment, so it must not be wrapped or combined with the line below it.
-// This is the line below it.
+ * A plain multi-line block comment with leading asterisks. It is wrapped the same way as a block doc comment, so this line should be wrapped to the configured width.
  * /* Rust allows block comments to nest, unlike C, so this inner comment does not end the outer one. */
  */
+
+/* Text after the opening delimiter keeps this block comment from being wrapped.
+// A line comment inside a block comment is part of the block comment, so it must not be wrapped or combined with the line below it.
+// This is the line below it.
+*/
 
 #[test]
 fn push_and_pop() {
