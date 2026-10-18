@@ -84,9 +84,9 @@ Consecutive comment lines are combined before wrapping when ALL of these are tru
 2. Same indentation level
 3. Same block quote depth (the number of leading `>`). The rules below apply to the text after the `>` prefix, and the prefix is repeated on every wrapped line.
 4. Neither line is blank
-5. The next line does not start with a hierarchical marker: `#`, `*`, `-`, `` ``` ``, `~~~`, `1.`, `A.`, `a.`, or one of these followed by a space: `+`, `1)`, `a)`, a Roman numeral followed by `.` or `)` (e.g. `ii.`, `XII)`)
+5. The next line does not start with a hierarchical marker: a heading (`#`), `*`, `-`, `` ``` ``, `~~~`, `1.`, `A.`, `a.`, or one of these followed by a space: `+`, `1)`, `a)`, a Roman numeral followed by `.` or `)` (e.g. `ii.`, `XII)`)
 6. The current line does not start with a code fence (`` ``` `` or `~~~`) or contain `` ``` ``
-7. The current line does not start with `#` (markdown heading lines are not combined with the text that follows)
+7. The current line is not a markdown heading (1 to 6 `#` characters followed by a space, a tab, or the end of the line, so `#42` and `#hashtag` are not headings). Headings are not combined with the text that follows.
 8. Neither line is a divider (four or more of the same punctuation character, e.g. `----`, `====`, `****`)
 9. Neither line is a markdown thematic break (up to three spaces of indentation, then three or more matching `-`, `_`, or `*` characters, optionally separated by spaces or tabs, e.g. `---`, `***`, `_ _ _`)
 10. The current line does not end with a markdown hard line break (a backslash, or two or more spaces). Wrapping keeps the break at the end of the last output line, and never moves a backslash to the end of a line.

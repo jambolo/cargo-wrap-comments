@@ -136,12 +136,13 @@ fn closes_code_fence(text: &str, open: (char, usize)) -> bool {
 /// Returns `true` if `text` begins with a markdown-style structural marker, ignoring leading whitespace (nested list items are
 /// indented).
 ///
-/// Recognized markers: `#`, `*`, `-`, a code fence (`` ``` `` or `~~~`), a single letter followed by `.` (e.g. `A.`, `a.`),
-/// or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`), plus the markers recognized by
-/// [`spaced_list_marker_width`].
+/// Recognized markers: an ATX heading (see [`is_atx_heading`]), `*`, `-`, a code fence (`` ``` `` or `~~~`), a single letter
+/// followed by `.` (e.g. `A.`, `a.`), or one or more digits followed by `.` (e.g. `1.`, `10.`, `100.`), plus the markers
+/// recognized by [`spaced_list_marker_width`].
 fn starts_with_hierarchical_marker(text: &str) -> bool {
     let text = text.trim_start();
-    if matches!(text.as_bytes().first(), Some(b'#' | b'*' | b'-'))
+    if is_atx_heading(text)
+        || matches!(text.as_bytes().first(), Some(b'*' | b'-'))
         || code_fence(text).is_some()
         || spaced_list_marker_width(text) > 0
     {
@@ -166,11 +167,18 @@ fn starts_with_hierarchical_marker(text: &str) -> bool {
     false
 }
 
+/// Returns `true` if `text` is a CommonMark ATX heading: 1 to 6 `#` characters followed by a space, a tab, or the end of the line.
+/// `#42`, `#hashtag`, and `####### seven` are not headings.
+fn is_atx_heading(text: &str) -> bool {
+    let hashes = text.bytes().take_while(|&b| b == b'#').count();
+    (1..=6).contains(&hashes) && matches!(text.as_bytes().get(hashes), None | Some(b' ' | b'\t'))
+}
+
 /// Returns the width of a hierarchical marker prefix (e.g. `- ` → 2, `1. ` → 3, `10. ` → 4, `## ` → 3).
 ///
 /// Returns 0 if the text does not start with a recognized marker.
 fn hierarchical_marker_width(text: &str) -> usize {
-    if text.starts_with('#') {
+    if is_atx_heading(text) {
         let hashes = text.bytes().take_while(|&b| b == b'#').count();
         if text.as_bytes().get(hashes) == Some(&b' ') {
             return hashes + 1;
@@ -368,8 +376,8 @@ fn trailing_space_break(text: &str) -> &str {
 /// Lines are combined when they share the same marker, indentation, and block quote depth, and the following rules hold for the
 /// text after any block quote prefix: neither is blank, a divider, a thematic break, a table row, or an SPDX tag, the next line
 /// doesn't start with a hierarchical marker or an annotation tag, the current line doesn't start with or contain a code fence or
-/// end with a hard line break (a backslash or two or more spaces), and a markdown heading line (starting with `#`) is not combined
-/// with the text that follows.
+/// end with a hard line break (a backslash or two or more spaces), and a markdown heading line (see [`is_atx_heading`]) is not
+/// combined with the text that follows.
 fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
     let (_, current_depth, current_text) = split_quote(&current.text);
     let (_, next_depth, next_text) = split_quote(&next.text);
@@ -392,7 +400,7 @@ fn can_combine(current: &CommentLine, next: &CommentLine) -> bool {
         && !starts_with_hierarchical_marker(next_text)
         && !current_text.contains("```")
         && code_fence(current_text).is_none()
-        && !current_text.starts_with('#')
+        && !is_atx_heading(current_text)
 }
 
 /// Splits text into tokens at whitespace boundaries, but keeps backtick-delimited spans (`` ` `` or ` `` ` as single tokens even if
@@ -526,7 +534,7 @@ fn leading_indent(text: &str) -> usize {
 /// Returns the column at which the content of a list item starts (e.g. `  - item` → 4), or `None` if `text` is not a list item.
 fn list_content_column(text: &str) -> Option<usize> {
     let body = text.trim_start();
-    if body.starts_with('#') {
+    if is_atx_heading(body) {
         return None;
     }
     match hierarchical_marker_width(body) {
@@ -1095,6 +1103,55 @@ mod tests {
     #[test]
     fn test_no_combine_heading_process() {
         let input = "// # Heading\n// some text after heading\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_is_atx_heading() {
+        assert!(is_atx_heading("# Heading"));
+        assert!(is_atx_heading("###### Six"));
+        assert!(is_atx_heading("##\tTab"));
+        assert!(is_atx_heading("#"));
+        assert!(!is_atx_heading("#42 is an issue"));
+        assert!(!is_atx_heading("#hashtag"));
+        assert!(!is_atx_heading("#[derive(Debug)]"));
+        assert!(!is_atx_heading("####### seven"));
+        assert!(!is_atx_heading("text"));
+        assert!(!is_atx_heading(""));
+        assert!(!starts_with_hierarchical_marker("#42 is an issue"));
+        assert_eq!(hierarchical_marker_width("####### seven"), 0);
+    }
+
+    #[test]
+    fn test_combine_lines_starting_with_hash_that_are_not_headings() {
+        let input = "// See issue #42 for details.\n// #42 is the same issue, but this line starts with a hash.\n// This line follows it.\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(
+            output,
+            "// See issue #42 for details. #42 is the same issue, but this line starts with a hash. This line follows it.\n"
+        );
+    }
+
+    #[test]
+    fn test_hash_lines_in_quote() {
+        let input = "// > See\n// > #42 for details.\n// > # Heading\n// > text\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// > See #42 for details.\n// > # Heading\n// > text\n");
+    }
+
+    #[test]
+    fn test_wrap_hash_line_that_is_not_heading_has_no_hanging_indent() {
+        let (output, _) = process_content("// #42 aaa bbb ccc\n", 14);
+        assert_eq!(output, "// #42 aaa bbb\n// ccc\n");
+        let (output, _) = process_content("// ## aaa bbb ccc\n", 14);
+        assert_eq!(output, "// ## aaa bbb\n//    ccc\n");
+    }
+
+    #[test]
+    fn test_hash_lines_in_code_blocks_pass_through() {
+        let input = "// ~~~\n// #[derive(Debug)]\n// #42\n// ~~~\n//\n//     #[derive(Debug)]\n//     #hashtag\n";
         let (output, changes) = process_content(input, 132);
         assert_eq!(output, input);
         assert!(changes.is_empty());
