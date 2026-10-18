@@ -92,9 +92,11 @@ struct Cli {
 struct CommentLine {
     /// Leading whitespace before the comment marker.
     indent: String,
-    /// The comment marker (`//`, `///`, or `//!`), or, in the body of a block doc comment, `*` (leading-asterisk style) or the
-    /// empty string (no-asterisk style).
+    /// The comment marker (`//`, `///`, `//!`, or a run of four or more slashes), or, in the body of a block doc comment, `*`
+    /// (leading-asterisk style) or the empty string (no-asterisk style).
     marker: String,
+    /// Whether a space follows the marker. Always `false` for an empty marker.
+    space: bool,
     /// The text content after the marker and optional space.
     text: String,
 }
@@ -104,17 +106,26 @@ const MARKERS: [&str; 3] = ["///", "//!", "//"];
 
 /// Parses a source line into a [`CommentLine`] if it contains a recognized comment marker.
 ///
+/// Four or more slashes make a plain comment, not a doc comment, so the whole run of slashes is the marker.
+///
 /// Returns `None` for non-comment lines.
 fn parse_comment_line(line: &str) -> Option<CommentLine> {
     let trimmed = line.trim_start();
     let indent = &line[..line.len() - trimmed.len()];
 
-    MARKERS.iter().find_map(|marker| {
-        trimmed.strip_prefix(marker).map(|rest| CommentLine {
-            indent: indent.to_string(),
-            marker: marker.to_string(),
-            text: rest.strip_prefix(' ').unwrap_or(rest).to_string(),
-        })
+    let slashes = trimmed.bytes().take_while(|&b| b == b'/').count();
+    let marker = if slashes >= 4 {
+        &trimmed[..slashes]
+    } else {
+        MARKERS.into_iter().find(|marker| trimmed.starts_with(marker))?
+    };
+    let rest = &trimmed[marker.len()..];
+    let text = rest.strip_prefix(' ');
+    Some(CommentLine {
+        indent: indent.to_string(),
+        marker: marker.to_string(),
+        space: text.is_some(),
+        text: text.unwrap_or(rest).to_string(),
     })
 }
 
@@ -178,12 +189,14 @@ fn parse_block_doc_body(body: &[&str]) -> Vec<Option<CommentLine>> {
                 Some(CommentLine {
                     indent: line[..line.len() - t.len()].to_string(),
                     marker: "*".to_string(),
+                    space: rest.starts_with(' '),
                     text: rest.strip_prefix(' ').unwrap_or(rest).to_string(),
                 })
             } else {
                 Some(CommentLine {
                     indent: line[..common_indent].to_string(),
                     marker: String::new(),
+                    space: false,
                     text: line[common_indent..].to_string(),
                 })
             }
@@ -768,9 +781,8 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         while j < lines.len() {
             if let Some(next_comment) = &parsed[j] {
                 let current = CommentLine {
-                    indent: comment.indent.clone(),
-                    marker: comment.marker.clone(),
                     text: combined_text.clone(),
+                    ..comment.clone()
                 };
                 if can_combine(&current, next_comment) {
                     combined_text.push(' ');
@@ -792,15 +804,20 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         let text = &combined_text[..combined_text.len() - hard_break.len()];
 
         let base = format!("{}{}", comment.indent, comment.marker);
-        // A block doc comment without leading asterisks has an empty marker, so its text follows the indent directly.
-        let prefix = if text.is_empty() || comment.marker.is_empty() {
+        // Keep the first line's spacing after the marker, so `//text` does not become `// text`. A block doc comment without
+        // leading asterisks has an empty marker and no space, so its text follows the indent directly.
+        let prefix = if text.is_empty() || !comment.space {
             base.clone()
         } else {
             format!("{base} ")
         };
         let full_line = format!("{prefix}{text}");
 
-        let mut new_lines = if text.is_empty() {
+        // A line that is neither combined nor wrapped is kept exactly as it is. Blank lines are still trimmed.
+        let unchanged = orig_lines.len() == 1 && !split_quote(text).2.trim().is_empty() && full_line.width() <= max_width;
+        let mut new_lines = if unchanged {
+            orig_lines.clone()
+        } else if text.is_empty() {
             vec![base.trim_end().to_string()]
         } else if full_line.width() > max_width {
             // A block quote prefix and leading spaces (e.g. a sub-list item) nest the text, so every wrapped line keeps them.
@@ -811,7 +828,7 @@ fn process_content(content: &str, max_width: usize) -> (String, Vec<Change>) {
         } else {
             vec![full_line.trim_end().to_string()]
         };
-        if let Some(last) = new_lines.last_mut() {
+        if !unchanged && let Some(last) = new_lines.last_mut() {
             last.push_str(hard_break);
         }
 
@@ -1157,6 +1174,78 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_no_space() {
+        let c = parse_comment_line("//no space").unwrap();
+        assert_eq!(c.marker, "//");
+        assert!(!c.space);
+        assert_eq!(c.text, "no space");
+        assert!(parse_comment_line("// space").unwrap().space);
+    }
+
+    #[test]
+    fn test_parse_four_or_more_slashes() {
+        let c = parse_comment_line("    //// plain comment").unwrap();
+        assert_eq!(c.marker, "////");
+        assert_eq!(c.text, "plain comment");
+        let c = parse_comment_line("////////").unwrap();
+        assert_eq!(c.marker, "////////");
+        assert_eq!(c.text, "");
+    }
+
+    #[test]
+    fn test_unchanged_lines_are_verbatim() {
+        let input = "//no space, short line.\n\n//// four slashes is a plain comment, not a doc comment.\n\nfn f() {\n    let x = 1;\n    ////////////////////////////////\n}\n// trailing spaces  \n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_four_slashes_not_combined_with_two() {
+        let input = "// two\n//// four\n//// four again\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "// two\n//// four four again\n");
+    }
+
+    #[test]
+    fn test_combine_and_wrap_keep_missing_space() {
+        let input = "//aaa bbb\n//ccc ddd\n";
+        let (output, _) = process_content(input, 132);
+        assert_eq!(output, "//aaa bbb ccc ddd\n");
+        let (output, _) = process_content("//aaa bbb ccc ddd\n", 12);
+        assert_eq!(output, "//aaa bbb\n//ccc ddd\n");
+    }
+
+    #[test]
+    fn test_missing_space_with_list_quote_and_hard_break() {
+        let (output, _) = process_content("//- aaa bbb ccc ddd\n", 14);
+        assert_eq!(output, "//- aaa bbb\n//  ccc ddd\n");
+        let (output, _) = process_content("//> aaa bbb ccc ddd\n", 14);
+        assert_eq!(output, "//> aaa bbb\n//> ccc ddd\n");
+        let (output, _) = process_content("//aaa bbb ccc  \n//ddd\n", 12);
+        assert_eq!(output, "//aaa bbb\n//ccc  \n//ddd\n");
+    }
+
+    #[test]
+    fn test_four_slashes_wrap_and_hard_break() {
+        let (output, _) = process_content("//// aaa bbb ccc ddd\n", 14);
+        assert_eq!(output, "//// aaa bbb\n//// ccc ddd\n");
+        let input = "//// one  \n//// two\n";
+        let (output, changes) = process_content(input, 132);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
+    fn test_unchanged_lines_verbatim_with_wide_chars_and_block_docs() {
+        // "//日本語" is 8 columns but 11 bytes, so it fits in 8 columns and is kept as it is.
+        let input = "//日本語\n///  two spaces\n/**\n *  two spaces\n */\n";
+        let (output, changes) = process_content(input, 16);
+        assert_eq!(output, input);
+        assert!(changes.is_empty());
+    }
+
+    #[test]
     fn test_hierarchical_markers() {
         assert!(starts_with_hierarchical_marker("# heading"));
         assert!(starts_with_hierarchical_marker("* bullet"));
@@ -1174,11 +1263,13 @@ mod tests {
         let a = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "hello".into(),
         };
         let b = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "world".into(),
         };
         assert!(can_combine(&a, &b));
@@ -1189,11 +1280,13 @@ mod tests {
         let a = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "hello".into(),
         };
         let b = CommentLine {
             indent: "".into(),
             marker: "///".into(),
+            space: true,
             text: "world".into(),
         };
         assert!(!can_combine(&a, &b));
@@ -1204,11 +1297,13 @@ mod tests {
         let a = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "hello".into(),
         };
         let b = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "".into(),
         };
         assert!(!can_combine(&a, &b));
@@ -1219,11 +1314,13 @@ mod tests {
         let a = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "hello".into(),
         };
         let b = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "- bullet".into(),
         };
         assert!(!can_combine(&a, &b));
@@ -1234,11 +1331,13 @@ mod tests {
         let a = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "# Heading".into(),
         };
         let b = CommentLine {
             indent: "".into(),
             marker: "//".into(),
+            space: true,
             text: "some text".into(),
         };
         assert!(!can_combine(&a, &b));
